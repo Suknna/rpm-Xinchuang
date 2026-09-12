@@ -101,13 +101,13 @@ install_build_deps() {
 		yum -y -q install rpm-build yum-utils gnupg2 curl cpio
 		# EL7 系统 gcc 4.8 不支持 OpenSSL 3.5 所需的 C11，必须 devtoolset-9
 		yum -y -q install devtoolset-9-gcc devtoolset-9-gcc-c++
-		# OpenSSL 3.x 的 ./config 需要 Perl 模块 IPC::Cmd（EL7 基础 perl 不含）
-		yum -y -q install "perl(IPC::Cmd)"
+		# OpenSSL 3.x 构建需要 IPC::Cmd / Time::Piece / Data::Dumper（EL7 基础 perl 不含）
+		yum -y -q install "perl(IPC::Cmd)" "perl(Time::Piece)" "perl(Data::Dumper)"
 		yum-builddep -y "$2" >/dev/null
 	else
 		dnf -y -q install rpm-build dnf-plugins-core gnupg2 curl cpio
-		# OpenSSL 3.x 的 ./config 需要 Perl 模块 IPC::Cmd
-		dnf -y -q install "perl(IPC::Cmd)"
+		# OpenSSL 3.x 构建需要的 Perl 模块
+		dnf -y -q install "perl(IPC::Cmd)" "perl(Time::Piece)" "perl(Data::Dumper)"
 		dnf -y -q builddep "$2"
 	fi
 }

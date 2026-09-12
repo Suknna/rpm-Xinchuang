@@ -250,14 +250,6 @@ uninstall)
 	assert_no_file "卸载不产生 .rpmsave（不移动文件）" /etc/ssh/sshd_config.rpmsave
 	;;
 
-*)
-	echo "unknown scenario: $SCENARIO" >&2
-	exit 2
-	;;
-esac
-
-case "$SCENARIO" in
-
 symlink-guard)
 	echo "=== 预置悬空软链与 FIFO（模拟既有目录项）"
 	mkdir -p /etc/ssh
