@@ -37,7 +37,10 @@
 - **EL7**：UBI7 自带主源已 404（EOL），补充 CentOS 7.9.2009 vault（base/updates/extras）
   与 SCLo vault（devtoolset-9，系统 gcc 4.8 不满足 OpenSSL 3.5 的 C11 要求）；
 - **EL8**：UBI8 自带源缺 `pam-devel`，补充 AlmaLinux 8（BaseOS/AppStream/PowerTools）；
-- 其余：rpm-build、gnupg2、krb5-devel、zlib-devel、zlib-static 等（见 spec 的 BuildRequires）；
+- 其余：rpm-build、gnupg2、krb5-devel、perl 模块（IPC::Cmd / Time::Piece /
+  Data::Dumper）、cpio 等（见 spec 的 BuildRequires 与 `scripts/repos-common.sh`）；
+  zlib 从源码以 -fPIC 静态构建（EL7 系统 libz.a 非 PIC，无法链入 PIE，
+  故 openssl 与 openssh 统一链接自建的静态 libz.a）；
 - **所有补充源均 `gpgcheck=1`**，且 GPG 公钥**固定在本仓库 `certs/` 下**
   （指纹已对照 centos.org / repo.almalinux.org 官方公布值逐一核验，见
   `scripts/repos-common.sh` 注释），不随源同渠道动态下载。

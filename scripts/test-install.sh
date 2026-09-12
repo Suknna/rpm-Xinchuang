@@ -48,19 +48,12 @@ assert_contains() {
 
 source /src/scripts/repos-common.sh
 
-PM_INSTALL() { # 用包管理器安装本地 rpm（自动解析依赖）
+PM_INSTALL() { # 用包管理器安装本地 rpm（自动解析依赖；测试工具链由 ensure_test_deps 前置补齐）
 	if [ "$EL" = el7 ]; then
 		yum -y install "$DIST"/openssh-*.rpm
 	else
 		dnf -y install "$DIST"/openssh-*.rpm
 	fi
-	# el8 精简镜像缺 cmp（diffutils）/ pgrep（procps-ng），行为断言需要
-	command -v cmp >/dev/null 2>&1 || {
-		if [ "$EL" = el7 ]; then yum -y -q install diffutils; else dnf -y -q install diffutils; fi
-	}
-	command -v pgrep >/dev/null 2>&1 || {
-		if [ "$EL" = el7 ]; then yum -y -q install procps; else dnf -y -q install procps-ng; fi
-	}
 }
 
 pid1_is_systemd() { [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ]; }

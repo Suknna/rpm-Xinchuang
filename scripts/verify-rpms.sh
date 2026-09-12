@@ -70,7 +70,7 @@ echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）
 # FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=64 → ghost 配置为 81。
 # 目录（flags=0，perms 以 d 开头）允许真实存在（如 /etc/ssh）。
 BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES:perms}\n]' "$DIST"/openssh-server-*.rpm \
-	"$DIST"/openssh-clients-*.rpm "$DIST"/openssh-1*.rpm 2>/dev/null |
+	"$DIST"/openssh-clients-*.rpm "$DIST"/openssh-$VER-1.$EL.x86_64.rpm 2>/dev/null |
 	while IFS=$'\t' read -r path flags perms; do
 		case "$path" in
 		/etc/*)
@@ -91,7 +91,7 @@ fi
 
 echo "== [$EL] 6) 模板与 ghost 声明、运行依赖"
 FILELIST=""
-for r in "$DIST"/openssh-1*.rpm "$DIST"/openssh-clients-*.rpm "$DIST"/openssh-server-*.rpm; do
+for r in "$DIST"/openssh-$VER-1.$EL.x86_64.rpm "$DIST"/openssh-clients-*.rpm "$DIST"/openssh-server-*.rpm; do
 	# 数组标签必须用 [] 重复括号；[] 内不可混入标量（el8 rpm 4.14 直接报错）
 	FILELIST="$FILELIST$(rpm -qp --qf '[%{FILENAMES}\n]' "$r")"$'\n'
 done
