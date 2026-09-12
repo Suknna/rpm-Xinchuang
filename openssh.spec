@@ -140,12 +140,15 @@ popd
 
 # 从源码构建静态 OpenSSL（含 zlib，不构建 shared/dso/tests/docs），
 # 安装到构建目录私有前缀，不触碰系统 OpenSSL。
-# --with-zlib-include/lib 指向我们的 PIC 静态 zlib。
+# --with-zlib-include/lib 指向我们的 PIC 静态 zlib；
+# 同时用 LDFLAGS 环境变量注入 -L，确保 openssl 自身链接 -lz 时能解析到
+# 静态 libz.a（3.x 不会把 --with-zlib-lib 自动加入链接搜索路径）。
 pushd ../openssl-%{ssl_ver}
+LDFLAGS="-L%{zlibdir}/lib" \
 ./config --prefix=%{ssldir} --openssldir=/etc/pki/tls \
 		no-shared no-dso no-tests no-docs zlib \
 		--with-zlib-include=%{zlibdir}/include \
-		--with-zlib-lib=%{zlibdir}/lib/libz.a
+		--with-zlib-lib=%{zlibdir}/lib
 # 并行度固定为 4：避免大内存编译尖峰（CI 2 核 runner 与小内存宿主均安全）
 make -j4
 make install_sw
