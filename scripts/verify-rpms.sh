@@ -68,17 +68,17 @@ done
 
 echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）"
 # FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=64 → ghost 配置为 81。
-# 目录（flags=0，mode 以 d 开头）允许真实存在（如 /etc/ssh）。
-BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES}\n]' "$DIST"/openssh-server-*.rpm \
+# 目录（flags=0，perms 以 d 开头）允许真实存在（如 /etc/ssh）。
+BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES:perms}\n]' "$DIST"/openssh-server-*.rpm \
 	"$DIST"/openssh-clients-*.rpm "$DIST"/openssh-1*.rpm 2>/dev/null |
-	while IFS=$'\t' read -r path flags modes; do
+	while IFS=$'\t' read -r path flags perms; do
 		case "$path" in
 		/etc/*)
-			case "$modes" in
+			case "$perms" in
 			d*) continue ;;
 			esac
 			if [ $(( flags & 1 )) -eq 0 ] || [ $(( flags & 16 )) -eq 0 ] || [ $(( flags & 64 )) -eq 0 ]; then
-				echo "BAD $path flags=$flags mode=$modes"
+				echo "BAD $path flags=$flags mode=$perms"
 			fi
 			;;
 		esac
@@ -92,7 +92,8 @@ fi
 echo "== [$EL] 6) 模板与 ghost 声明、运行依赖"
 FILELIST=""
 for r in "$DIST"/openssh-1*.rpm "$DIST"/openssh-clients-*.rpm "$DIST"/openssh-server-*.rpm; do
-	FILELIST="$FILELIST$(rpm -qp --qf '%{NAME} %{FILENAMES}\n' "$r")"$'\n'
+	# 数组标签必须用 [] 重复括号；[] 内不可混入标量（el8 rpm 4.14 直接报错）
+	FILELIST="$FILELIST$(rpm -qp --qf '[%{FILENAMES}\n]' "$r")"$'\n'
 done
 for t in /usr/share/openssh/sshd_config /usr/share/openssh/ssh_config \
          /usr/share/openssh/moduli /usr/share/openssh/sshd.pam \
@@ -100,7 +101,7 @@ for t in /usr/share/openssh/sshd_config /usr/share/openssh/ssh_config \
 	echo "$FILELIST" | grep -q "$t" && pass "模板 $t" || fail "缺模板 $t"
 done
 for g in /etc/ssh/sshd_config /etc/ssh/ssh_config /etc/ssh/moduli /etc/pam.d/sshd /etc/rc.d/init.d/sshd; do
-	echo "$FILELIST" | grep -q " $g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
+	echo "$FILELIST" | grep -qx "$g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
 done
 REQ="$(rpm -qp --requires "$DIST"/openssh-server-*.rpm)"
 echo "$REQ" | grep -q "initscripts" && pass "Requires initscripts" || fail "缺 Requires initscripts"

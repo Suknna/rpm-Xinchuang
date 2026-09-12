@@ -54,17 +54,24 @@ PM_INSTALL() { # 用包管理器安装本地 rpm（自动解析依赖）
 	else
 		dnf -y install "$DIST"/openssh-*.rpm
 	fi
+	# el8 精简镜像缺 cmp（diffutils），行为断言需要
+	command -v cmp >/dev/null 2>&1 || {
+		if [ "$EL" = el7 ]; then yum -y -q install diffutils; else dnf -y -q install diffutils; fi
+	}
 }
 
 pid1_is_systemd() { [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ]; }
 
 start_distro_sshd() { # 发行版包的启动方式（升级场景）
-	if [ "$EL" = el7 ]; then
+	# 注意：el7.4+/el8 发行版 openssh-server 均已改用原生 systemd unit（无 SysV 脚本），
+	# 容器内无 systemd 时统一直接拉起 /usr/sbin/sshd（效果等同，写 /var/run/sshd.pid）。
+	# 真实升级场景中主机必然已有 host key；容器内补齐缺失项以模拟该前置。
+	ssh-keygen -A >/dev/null 2>&1 || :
+	if [ -x /etc/rc.d/init.d/sshd ]; then
 		/etc/rc.d/init.d/sshd start
 	elif pid1_is_systemd; then
 		systemctl start sshd
 	else
-		# 容器无 systemd：直接拉起守护进程（效果等同，写 /var/run/sshd.pid）
 		/usr/sbin/sshd
 	fi
 }
