@@ -17,6 +17,14 @@ FAIL=0
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 
+# 自举解包依赖（镜像内置 rpm，但 cpio/binutils 不一定有）
+PKGS=""
+command -v cpio >/dev/null 2>&1 || PKGS="$PKGS cpio"
+command -v readelf >/dev/null 2>&1 || PKGS="$PKGS binutils"
+if [ -n "${PKGS:-}" ]; then
+	if command -v dnf >/dev/null 2>&1; then dnf -y -q install $PKGS; else yum -y -q install $PKGS; fi
+fi
+
 SPEC="${SRC_DIR:-/src}/openssh.spec"
 VER="$(sed -n 's/^%global ver[[:space:]]\+//p' "$SPEC" | head -1 | tr -d '[:space:]')"
 
@@ -33,6 +41,8 @@ echo "== [$EL] 2) SHA256SUMS"
 	&& pass "SHA256SUMS 校验通过" || fail "SHA256SUMS 不一致"
 
 echo "== [$EL] 3/4) ELF 动态依赖检查（静态 libcrypto/libssl/zlib + 动态 PAM）"
+# 用 readelf 检查“直接 NEEDED”：ldd 会列出 krb5 等传递依赖（如 libk5crypto→libcrypto.so），
+# 造成误判；静态链接成功的判定是二进制自身 NEEDED 中不含 libcrypto/libssl/libz。
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/x"
@@ -41,13 +51,14 @@ for rpm in "$DIST"/openssh-*.rpm; do
 done
 FOUND_SSL=0; FOUND_Z=0
 while IFS= read -r bin; do
-	out="$(ldd "$bin" 2>/dev/null)" || continue
-	echo "$out" | grep -qE "libcrypto|libssl" && { FOUND_SSL=1; fail "动态依赖 libcrypto/libssl: $bin"; }
-	echo "$out" | grep -qE "libz\.so" && { FOUND_Z=1; fail "动态依赖 libz: $bin"; }
+	needed="$(readelf -d "$bin" 2>/dev/null | grep NEEDED || true)"
+	[ -n "$needed" ] || continue
+	echo "$needed" | grep -qE "libcrypto|libssl" && { FOUND_SSL=1; fail "直接依赖 libcrypto/libssl: $bin"; }
+	echo "$needed" | grep -qE "libz\.so" && { FOUND_Z=1; fail "直接依赖 libz: $bin"; }
 done < <(find "$TMP/x" -type f \( -path "*/bin/*" -o -path "*/sbin/*" -o -path "*/openssh/*" \))
-[ "$FOUND_SSL" = 0 ] && pass "无 libcrypto/libssl 动态依赖"
-[ "$FOUND_Z" = 0 ] && pass "无 libz 动态依赖"
-ldd "$TMP/x/usr/sbin/sshd" 2>/dev/null | grep -q libpam \
+[ "$FOUND_SSL" = 0 ] && pass "无 libcrypto/libssl 直接动态依赖（静态链接生效）"
+[ "$FOUND_Z" = 0 ] && pass "无 libz 直接动态依赖（静态 zlib 生效）"
+readelf -d "$TMP/x/usr/sbin/sshd" 2>/dev/null | grep libpam >/dev/null \
 	&& pass "sshd 动态链接 libpam" || fail "sshd 未动态链接 libpam"
 for b in sshd sshd-session sftp-server; do
 	[ -x "$TMP/x/usr/sbin/$b" ] || [ -x "$TMP/x/usr/libexec/openssh/$b" ] || fail "缺少服务端二进制 $b"
@@ -55,14 +66,19 @@ done
 [ -x "$TMP/x/usr/libexec/openssh/sshd-auth" ] && pass "sshd-auth 就位" || fail "缺少 sshd-auth"
 [ -x "$TMP/x/usr/bin/ssh" ] && pass "客户端二进制就位" || fail "缺少 ssh"
 
-echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记）"
-# FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=32。/etc 下所有文件必须同时带三标记(49)。
-BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\n]' "$DIST"/openssh-*.rpm |
-	while IFS=$'\t' read -r path flags; do
+echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）"
+# FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=64 → ghost 配置为 81。
+# 目录（flags=0，mode 以 d 开头）允许真实存在（如 /etc/ssh）。
+BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES}\n]' "$DIST"/openssh-server-*.rpm \
+	"$DIST"/openssh-clients-*.rpm "$DIST"/openssh-1*.rpm 2>/dev/null |
+	while IFS=$'\t' read -r path flags modes; do
 		case "$path" in
 		/etc/*)
-			if [ $(( flags & 1 )) -eq 0 ] || [ $(( flags & 16 )) -eq 0 ] || [ $(( flags & 32 )) -eq 0 ]; then
-				echo "BAD $path flags=$flags"
+			case "$modes" in
+			d*) continue ;;
+			esac
+			if [ $(( flags & 1 )) -eq 0 ] || [ $(( flags & 16 )) -eq 0 ] || [ $(( flags & 64 )) -eq 0 ]; then
+				echo "BAD $path flags=$flags mode=$modes"
 			fi
 			;;
 		esac
@@ -74,14 +90,17 @@ else
 fi
 
 echo "== [$EL] 6) 模板与 ghost 声明、运行依赖"
-FILELIST="$(rpm -qp --qf '%{NAME} %{FILENAMES}\n' "$DIST"/openssh-*.rpm)"
+FILELIST=""
+for r in "$DIST"/openssh-1*.rpm "$DIST"/openssh-clients-*.rpm "$DIST"/openssh-server-*.rpm; do
+	FILELIST="$FILELIST$(rpm -qp --qf '%{NAME} %{FILENAMES}\n' "$r")"$'\n'
+done
 for t in /usr/share/openssh/sshd_config /usr/share/openssh/ssh_config \
          /usr/share/openssh/moduli /usr/share/openssh/sshd.pam \
          /usr/share/openssh/sshd.init; do
 	echo "$FILELIST" | grep -q "$t" && pass "模板 $t" || fail "缺模板 $t"
 done
 for g in /etc/ssh/sshd_config /etc/ssh/ssh_config /etc/ssh/moduli /etc/pam.d/sshd /etc/rc.d/init.d/sshd; do
-	echo "$FILELIST" | grep -q "$g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
+	echo "$FILELIST" | grep -q " $g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
 done
 REQ="$(rpm -qp --requires "$DIST"/openssh-server-*.rpm)"
 echo "$REQ" | grep -q "initscripts" && pass "Requires initscripts" || fail "缺 Requires initscripts"

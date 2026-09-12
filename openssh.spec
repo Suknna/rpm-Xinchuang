@@ -24,6 +24,8 @@
 %global ver 10.0p1
 # 静态链接的 OpenSSL 版本（仅手动更新）
 %global ssl_ver 3.5.3
+# 静态链接的 zlib 版本（仅手动更新；系统 libz.a 非 PIC，无法链入 PIE，故从源码构建）
+%global zlib_ver 1.3.1
 %global rel 1%{?dist}
 
 # OpenSSH privilege separation requires a user & group ID
@@ -33,6 +35,8 @@
 # 静态 OpenSSL 构建目录（%builddir 下，install_sw 安装到 -install 后缀目录；
 # 注意 install_sw 在 64 位系统把库放到 lib64/ 子目录，%build 中动态探测）
 %global ssldir %{_builddir}/openssl-%{ssl_ver}-install
+# PIC 静态 zlib 的安装前缀
+%global zlibdir %{_builddir}/zlib-%{zlib_ver}-install
 
 Summary: The OpenSSH implementation of SSH protocol version 2.
 Name: openssh
@@ -41,6 +45,7 @@ Release: %{rel}
 URL: https://www.openssh.com/portable.html
 Source0: https://cloudflare.cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-%{ver}.tar.gz
 Source1: https://github.com/openssl/openssl/releases/download/openssl-%{ssl_ver}/openssl-%{ssl_ver}.tar.gz
+Source2: https://github.com/madler/zlib/releases/download/v%{zlib_ver}/zlib-%{zlib_ver}.tar.gz
 License: BSD
 Group: Applications/Internet
 BuildRoot: %{_tmppath}/%{name}-%{version}-buildroot
@@ -52,9 +57,7 @@ BuildRequires: gcc
 BuildRequires: glibc-devel
 # PAM：动态链接（--with-pam）
 BuildRequires: pam-devel
-# 静态 OpenSSL 的 zlib 支持 + OpenSSH 二进制静态链接 zlib（不依赖系统 libz.so）
-BuildRequires: zlib-devel
-BuildRequires: zlib-static
+# zlib：从源码以 -fPIC 静态构建（见 %build），无需系统 zlib-devel/zlib-static
 %if 0%{?rhel} == 7
 # OpenSSL 3.5.3 requires a C11 compiler; CentOS 7 stock GCC 4.8.5 is insufficient.
 # devtoolset-9 由构建环境提供的 SCLo 仓库安装（UBI7 自带主源已 404）。
@@ -120,17 +123,28 @@ and preserves all existing configuration files under /etc/ssh.
 %prep
 %setup -q
 tar -xzf %{SOURCE1} -C ..
+tar -xzf %{SOURCE2} -C ..
 
 %build
 %if 0%{?rhel} == 7
 . /opt/rh/devtoolset-9/enable
 %endif
 
+# 从源码构建 PIC 静态 zlib（系统 libz.a 非 PIC，无法链入 PIE），
+# 供 OpenSSL 的 zlib 支持与 OpenSSH 自身 -lz 一并静态链接。
+pushd ../zlib-%{zlib_ver}
+CFLAGS="-O2 -fPIC" ./configure --static --prefix=%{zlibdir}
+make -j4 libz.a
+make install
+popd
+
 # 从源码构建静态 OpenSSL（含 zlib，不构建 shared/dso/tests/docs），
 # 安装到构建目录私有前缀，不触碰系统 OpenSSL。
+# ZLIB_INCLUDE/ZLIB_LIB 指向我们的 PIC 静态 zlib。
 pushd ../openssl-%{ssl_ver}
-./config --prefix=%{ssldir} --openssldir=/etc/pki/tls \
-	no-shared no-dso no-tests no-docs zlib
+ZLIB_INCLUDE="-I%{zlibdir}/include" ZLIB_LIB="%{zlibdir}/lib/libz.a" \
+	./config --prefix=%{ssldir} --openssldir=/etc/pki/tls \
+		no-shared no-dso no-tests no-docs zlib
 # 并行度固定为 4：避免大内存编译尖峰（CI 2 核 runner 与小内存宿主均安全）
 make -j4
 make install_sw
@@ -138,14 +152,11 @@ popd
 
 # 静态链接 libcrypto/libssl/zlib；glibc/PAM/Kerberos 保持动态链接。
 # install_sw 依据架构把静态库装到 lib/ 或 lib64/，这里探测后统一引用。
-# zlib：仅含 libz.a 的专用 -L 目录在前，强制 -lz 解析到静态库。
+# -L zlibdir/lib 在前，强制 -lz 解析到我们的 PIC 静态 libz.a。
 unset CFLAGS LDFLAGS LIBS CPPFLAGS
 SSL_LIB="$( [ -f %{ssldir}/lib64/libcrypto.a ] && echo %{ssldir}/lib64 || echo %{ssldir}/lib )"
-ZLIB_A="$( [ -f %{_libdir}/libz.a ] && echo %{_libdir}/libz.a || echo /usr/lib/libz.a )"
-mkdir -p %{_builddir}/static-zlib
-ln -sf "$ZLIB_A" %{_builddir}/static-zlib/libz.a
 export CFLAGS="-I%{ssldir}/include -fPIC"
-export LDFLAGS="-L%{_builddir}/static-zlib -L$SSL_LIB -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -pie"
+export LDFLAGS="-L%{zlibdir}/lib -L$SSL_LIB -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -pie"
 export LIBS="$SSL_LIB/libcrypto.a \
              $SSL_LIB/libssl.a \
              -ldl -lpthread -lz"

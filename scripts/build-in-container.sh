@@ -31,8 +31,9 @@ install_build_deps "$EL" "$SRC/openssh.spec"
 # spec 是版本唯一来源（避免两处维护漂移）
 VER="$(sed -n 's/^%global ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
 SSL_VER="$(sed -n 's/^%global ssl_ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
-[ -n "$VER" ] && [ -n "$SSL_VER" ] || { echo "ERROR: cannot parse ver/ssl_ver from spec" >&2; exit 2; }
-echo "== [$EL] OpenSSH=$VER OpenSSL=$SSL_VER"
+ZLIB_VER="$(sed -n 's/^%global zlib_ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
+[ -n "$VER" ] && [ -n "$SSL_VER" ] && [ -n "$ZLIB_VER" ] || { echo "ERROR: cannot parse ver/ssl_ver from spec" >&2; exit 2; }
+echo "== [$EL] OpenSSH=$VER OpenSSL=$SSL_VER zlib=$ZLIB_VER"
 
 # 按平台隔离 rpmbuild 顶层目录，允许 el7/el8 并行构建互不干扰
 RPM_TOP="$SRC/.rpmbuild/$EL"
@@ -75,19 +76,25 @@ fi
 	"$SOURCES/openssh-${VER}.tar.gz"
 echo "OpenSSH ${VER} GPG signature OK"
 
-# OpenSSL tarball：SHA256 必须命中 certs/checksums.yaml 中人工维护的条目
+# OpenSSL / zlib tarball：SHA256 必须命中 certs/checksums.yaml 中人工维护的条目
 SSL_TGZ="openssl-${SSL_VER}.tar.gz"
+ZLIB_TGZ="zlib-${ZLIB_VER}.tar.gz"
 fetch "$SOURCES/$SSL_TGZ" \
 	"https://github.com/openssl/openssl/releases/download/openssl-${SSL_VER}/$SSL_TGZ" \
 	"https://mirrors.cloud.tencent.com/openssl/source/$SSL_TGZ"
-WANT_SHA="$(grep -E "^${SSL_TGZ}:" "$SRC/certs/checksums.yaml" \
-	| awk '{print $2}' | sed 's/^sha256://')"
-[ -n "$WANT_SHA" ] || {
-	echo "ERROR: no pinned sha256 for $SSL_TGZ; update certs/checksums.yaml" >&2
-	exit 2
-}
-echo "$WANT_SHA  $SOURCES/$SSL_TGZ" | sha256sum -c -
-echo "OpenSSL ${SSL_VER} SHA256 OK"
+fetch "$SOURCES/$ZLIB_TGZ" \
+	"https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/$ZLIB_TGZ" \
+	"https://zlib.net/fossils/$ZLIB_TGZ"
+for TGZ in "$SSL_TGZ" "$ZLIB_TGZ"; do
+	WANT_SHA="$(grep -E "^${TGZ}:" "$SRC/certs/checksums.yaml" \
+		| awk '{print $2}' | sed 's/^sha256://')"
+	[ -n "$WANT_SHA" ] || {
+		echo "ERROR: no pinned sha256 for $TGZ; update certs/checksums.yaml" >&2
+		exit 2
+	}
+	echo "$WANT_SHA  $SOURCES/$TGZ" | sha256sum -c -
+	echo "${TGZ} SHA256 OK"
+done
 
 echo "== [$EL] rpmbuild"
 cp -f "$SRC/openssh.spec" "$RPM_TOP/SPECS/"
