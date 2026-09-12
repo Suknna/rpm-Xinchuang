@@ -159,7 +159,7 @@ popd
 # -L zlibdir/lib 在前，强制 -lz 解析到我们的 PIC 静态 libz.a。
 unset CFLAGS LDFLAGS LIBS CPPFLAGS
 SSL_LIB="$( [ -f %{ssldir}/lib64/libcrypto.a ] && echo %{ssldir}/lib64 || echo %{ssldir}/lib )"
-export CFLAGS="-I%{ssldir}/include -fPIC"
+export CFLAGS="-I%{ssldir}/include -I%{zlibdir}/include -fPIC"
 export LDFLAGS="-L%{zlibdir}/lib -L$SSL_LIB -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -pie"
 export LIBS="$SSL_LIB/libcrypto.a \
              $SSL_LIB/libssl.a \
