@@ -54,9 +54,12 @@ PM_INSTALL() { # 用包管理器安装本地 rpm（自动解析依赖）
 	else
 		dnf -y install "$DIST"/openssh-*.rpm
 	fi
-	# el8 精简镜像缺 cmp（diffutils），行为断言需要
+	# el8 精简镜像缺 cmp（diffutils）/ pgrep（procps-ng），行为断言需要
 	command -v cmp >/dev/null 2>&1 || {
 		if [ "$EL" = el7 ]; then yum -y -q install diffutils; else dnf -y -q install diffutils; fi
+	}
+	command -v pgrep >/dev/null 2>&1 || {
+		if [ "$EL" = el7 ]; then yum -y -q install procps; else dnf -y -q install procps-ng; fi
 	}
 }
 
@@ -112,6 +115,16 @@ el7) configure_repos_el7 ;;
 el8) configure_repos_el8 ;;
 *) echo "unknown EL" >&2; exit 2 ;;
 esac
+
+ensure_test_deps() { # 测试工具链补齐（部分场景在 PM_INSTALL 之前就需要 pgrep/cmp）
+	command -v cmp >/dev/null 2>&1 || {
+		if [ "$EL" = el7 ]; then yum -y -q install diffutils; else dnf -y -q install diffutils; fi
+	}
+	command -v pgrep >/dev/null 2>&1 || {
+		if [ "$EL" = el7 ]; then yum -y -q install procps; else dnf -y -q install procps-ng; fi
+	}
+}
+ensure_test_deps
 
 case "$SCENARIO" in
 
@@ -192,8 +205,13 @@ upgrade)
 	assert_eq "sshd_config 内容未变" "$CONFIG_BEFORE" "$(config_state)"
 	assert_contains "定制标记仍在" "$(cat /etc/ssh/sshd_config)" "$MARKER"
 	assert_eq "host key 未被改写" "$KEYS_BEFORE" "$(keys_state)"
-	assert_eq "init 脚本未被替换/移动" "$INIT_BEFORE" \
-		"$(sha256sum /etc/rc.d/init.d/sshd 2>/dev/null | awk '{print $1}')"
+	if [ -n "$INIT_BEFORE" ]; then
+		assert_eq "init 脚本未被替换/移动" "$INIT_BEFORE" \
+			"$(sha256sum /etc/rc.d/init.d/sshd 2>/dev/null | awk '{print $1}')"
+	else
+		# el7.4+/el8 发行版无 SysV 脚本：本包按“仅补缺失”策略以模板新增（非替换）
+		assert_file "发行版无 init 脚本，本包从模板补齐（新增非替换）" /etc/rc.d/init.d/sshd
+	fi
 	assert_no_file "严格策略：不产生 .rpmnew" /etc/ssh/sshd_config.rpmnew
 	assert_no_file "严格策略：不产生 .rpmsave" /etc/ssh/sshd_config.rpmsave
 	assert_no_file "严格策略：不产生 .rpmnew(init)" /etc/rc.d/init.d/sshd.rpmnew
