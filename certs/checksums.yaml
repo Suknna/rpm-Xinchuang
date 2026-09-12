@@ -1,0 +1,9 @@
+# OpenSSL 源码包 SHA256 固定表（信任锚，人工维护，不随 CI 自动变化）。
+#
+# 约定：升级 OpenSSL（修改 openssh.spec 中 %global ssl_ver）时，必须：
+#   1. 用官方签名的源码包验证后，在此新增/更新对应条目；
+#   2. 同步更新 openssh.spec 中两处 %global ssl_ver 相关配置（构建脚本自动引用此处哈希）。
+#
+# openssl-3.5.3.tar.gz 的哈希已使用官方签名验证：
+#   签名 key: BA5473A2 B0587B07 FB27CF2D 216094DF D0CB81EF (OpenSSL <openssl@openssl.org>)
+openssl-3.5.3.tar.gz: sha256:c9489d2abcf943cdc8329a57092331c598a402938054dc3a22218aea8a8ec3bf

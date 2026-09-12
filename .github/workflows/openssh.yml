@@ -1,0 +1,345 @@
+# OpenSSH EL7/EL8 RPM 自动构建与发布
+#
+# 触发：
+#   * schedule：北京时间每天 09:17（UTC 01:17）检查上游镜像，仅当出现数值更高的
+#     稳定 portable 版本时构建、测试、发布并回写 version.txt / openssh.spec；
+#   * workflow_dispatch：受控手动运行（可强制指定版本 / 仅构建不发布）。
+#
+# 安全边界：
+#   * 无 pull_request 触发——外部 PR 永远不会拿到本仓库的任何 token；
+#   * 默认仅 contents:read，只有 release/keepalive 两个受控 job 需要 contents:write；
+#   * GITHUB_TOKEN 仅对本仓库有效；
+#   * 所有第三方 action 固定到 commit SHA；UBI 基础镜像固定 digest。
+#
+# 幂等与并发：
+#   * concurrency 排队执行（不取消进行中的运行）；
+#   * Release 按 tag 存在性 + 全部资产哈希校验后决定是否重入（不完整即失败，
+#     绝不在资产不完整时回写版本）；
+#   * 版本回写基于 git diff，无变化时不产生提交；
+#   * keepalive 串行在 release 之后，避免同 run 并发 push 竞争。
+name: openssh-rpms
+
+on:
+  schedule:
+    # 北京时间每天 09:17 = UTC 01:17
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '强制构建的 OpenSSH 版本（格式 X.YpZ，留空=自动检测）'
+        required: false
+        default: ''
+      skip_release:
+        description: '仅构建验证，不发布 Release、不回写版本'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openssh-rpms
+  cancel-in-progress: false
+
+env:
+  # 官方 UBI 基础镜像，固定 digest（升级 digest 属受控变更，与 local-*.sh 同步更新）
+  UBI7_IMAGE: registry.access.redhat.com/ubi7/ubi@sha256:046e525722f14702c360dc6092324af7c21656e76b0c254b067871f1d4d3df68
+  UBI8_IMAGE: registry.access.redhat.com/ubi8/ubi@sha256:ed721ca811f29fa0fd8a4666aec2fb6771f3defbecc708a973d0b711d6f09293
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.detect.outputs.new_version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 检测上游新版本
+        id: detect
+        env:
+          FORCE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$FORCE_VERSION" ]; then
+            echo "$FORCE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+p[0-9]+$' || {
+              echo "非法版本格式: $FORCE_VERSION（应为 X.YpZ）" >&2
+              exit 1
+            }
+            echo "强制指定版本: $FORCE_VERSION"
+            echo "new_version=$FORCE_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          python3 scripts/check_update.py check \
+            --version-file version.txt --output "$GITHUB_OUTPUT"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) exit 0 ;;
+            1) echo "上游无更高版本"; exit 0 ;;
+            *) exit "$rc" ;;
+          esac
+
+  build-el7:
+    needs: check
+    if: needs.check.outputs.new_version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 对齐 spec 版本
+        env:
+          NEW_VERSION: ${{ needs.check.outputs.new_version }}
+        run: |
+          sed -i "s/^%global ver .*/%global ver ${NEW_VERSION}/" openssh.spec
+          grep -n "%global ver" openssh.spec
+      - name: 在官方 UBI7 容器内构建
+        run: |
+          docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
+            "$UBI7_IMAGE" bash /src/scripts/build-in-container.sh el7
+      - name: 产物质量门禁（verify-rpms）
+        run: |
+          docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
+            "$UBI7_IMAGE" bash /src/scripts/verify-rpms.sh el7
+      - name: 上传构建产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpms-el7
+          path: |
+            dist/el7/*.rpm
+            dist/el7/SHA256SUMS
+          if-no-files-found: error
+
+  build-el8:
+    needs: check
+    if: needs.check.outputs.new_version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 对齐 spec 版本
+        env:
+          NEW_VERSION: ${{ needs.check.outputs.new_version }}
+        run: |
+          sed -i "s/^%global ver .*/%global ver ${NEW_VERSION}/" openssh.spec
+          grep -n "%global ver" openssh.spec
+      - name: 在官方 UBI8 容器内构建
+        run: |
+          docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
+            "$UBI8_IMAGE" bash /src/scripts/build-in-container.sh el8
+      - name: 产物质量门禁（verify-rpms）
+        run: |
+          docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
+            "$UBI8_IMAGE" bash /src/scripts/verify-rpms.sh el8
+      - name: 上传构建产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpms-el8
+          path: |
+            dist/el8/*.rpm
+            dist/el8/SHA256SUMS
+          if-no-files-found: error
+
+  test-el7:
+    needs: build-el7
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 下载构建产物
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpms-el7
+          path: dist/el7
+      - name: 安装行为测试（5 场景，每场景独立干净容器）
+        run: |
+          fail=0
+          for s in fresh upgrade reinstall uninstall symlink-guard; do
+            echo "########## el7 / $s ##########"
+            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
+              "$UBI7_IMAGE" bash /src/scripts/test-install.sh el7 "$s" || fail=1
+          done
+          exit $fail
+
+  test-el8:
+    needs: build-el8
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 下载构建产物
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpms-el8
+          path: dist/el8
+      - name: 安装行为测试（5 场景，每场景独立干净容器）
+        run: |
+          fail=0
+          for s in fresh upgrade reinstall uninstall symlink-guard; do
+            echo "########## el8 / $s ##########"
+            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
+              "$UBI8_IMAGE" bash /src/scripts/test-install.sh el8 "$s" || fail=1
+          done
+          exit $fail
+
+  release:
+    needs: [check, build-el7, build-el8, test-el7, test-el8]
+    if: needs.check.outputs.new_version != '' && github.event.inputs.skip_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VER: ${{ needs.check.outputs.new_version }}
+      BRANCH: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 下载构建产物（按平台分目录，避免平铺覆盖）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpms-el7
+          path: dist/el7
+      - name: 下载构建产物（EL8）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpms-el8
+          path: dist/el8
+      - name: 展示产物
+        run: find dist -type f | sort
+      - name: 幂等发布 Release（EL7/EL8 构建+测试全部通过才到达此步）
+        run: |
+          set -uo pipefail
+          # 期望资产：相对路径（el7/... el8/...）+ 两个改名后的 SUMS 文件
+          expected="$(cd dist && ls el7/*.rpm el8/*.rpm | sort)"
+          cp dist/el7/SHA256SUMS /tmp/SHA256SUMS-el7
+          cp dist/el8/SHA256SUMS /tmp/SHA256SUMS-el8
+
+          if python3 scripts/check_update.py has-release \
+              --repo "$GITHUB_REPOSITORY" --tag "v$VER"; then
+            # 重入路径：Release 已存在 → 必须证明资产完整且与本次产物逐一致，
+            # 否则视为失败，不发布也不回写版本。
+            echo "Release v$VER 已存在，校验资产完整性…"
+            gh release view "v$VER" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
+            fail=0
+            { for a in $expected; do basename "$a"; done
+              echo SHA256SUMS-el7; echo SHA256SUMS-el8; } | sort -u |
+            while read -r a; do
+              grep -qx "$a" /tmp/assets.txt || echo "MISSING $a"
+            done > /tmp/missing.txt
+            if [ -s /tmp/missing.txt ]; then
+              cat /tmp/missing.txt >&2
+              echo "资产不完整，禁止重入（不发布、不回写版本）" >&2
+              exit 1
+            fi
+            tmpd="$(mktemp -d)"
+            gh release download "v$VER" --dir "$tmpd" --clobber
+            for a in $expected; do
+              l="$(sha256sum "dist/$a" | awk '{print $1}')"
+              r="$(sha256sum "$tmpd/$(basename "$a")" | awk '{print $1}')"
+              [ "$l" = "$r" ] || { echo "资产哈希不一致: $a (local=$l remote=$r)" >&2; exit 1; }
+            done
+            diff /tmp/SHA256SUMS-el7 "$tmpd/SHA256SUMS-el7" >/dev/null || { echo "SHA256SUMS-el7 不一致" >&2; exit 1; }
+            diff /tmp/SHA256SUMS-el8 "$tmpd/SHA256SUMS-el8" >/dev/null || { echo "SHA256SUMS-el8 不一致" >&2; exit 1; }
+            echo "资产校验通过：发布与回写均可安全重入"
+            exit 0
+          fi
+
+          # 首次发布
+          {
+            echo "## OpenSSH ${VER}（EL7 / EL8, x86_64）"
+            echo
+            echo "基于官方 UBI7 / UBI8 容器（固定 digest）构建；静态链接 OpenSSL 与 zlib，"
+            echo "动态链接 glibc / PAM / Kerberos5；不含图形 askpass。"
+            echo "构建门禁：三包 EVR/arch 校验、ELF 无 libcrypto/libssl/libz 动态依赖、"
+            echo "sshd 动态链接 libpam、/etc 零 payload、5 项安装行为测试全部通过。"
+            echo
+            echo "### 安装 / 升级须知"
+            echo "- 本包安装与升级**不会**自动重启、停止或重载正在运行的 sshd；"
+            echo "  升级后请择机手动执行："
+            echo "  \`service sshd restart\`（EL7）或 \`systemctl daemon-reload && systemctl restart sshd\`（EL8）。"
+            echo "- 从发行版 openssh-server 升级时，**旧包自带的卸载脚本可能触发一次重启**；"
+            echo "  本包已保证保留的配置可通过新版本语法检查（安装日志可见），但不对该重启作保证。"
+            echo "- 严格配置保留：/etc 下的配置以 ghost 方式登记所有权、不随包分发内容；"
+            echo "  任何升级都不会改写/移动/删除既有配置，也不会产生 .rpmnew/.rpmsave。"
+            echo "- 默认配置模板位于 /usr/share/openssh/，仅当 /etc 中目标缺失时才会补齐。"
+            echo "- 不会改写任何已有 host key；缺失密钥由 init 脚本在首次启动时补齐。"
+            echo
+            echo "### 产物校验"
+            echo '```'
+            cat /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8
+            echo '```'
+            echo "源码：openssh-${VER}.tar.gz（构建时已验证官方 GPG 签名）；"
+            echo "OpenSSL 固定为 spec 内声明版本，不经 CI 自动升级。"
+          } > /tmp/notes.md
+          gh release create "v$VER" \
+            dist/el7/*.rpm dist/el8/*.rpm \
+            /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8 \
+            --title "OpenSSH ${VER} RPM (EL7/EL8, x86_64)" \
+            --notes-file /tmp/notes.md
+      - name: 回写版本（openssh.spec + version.txt）
+        run: |
+          sed -i "s/^%global ver .*/%global ver ${VER}/" openssh.spec
+          echo "$VER" > version.txt
+          if git diff --quiet; then
+            echo "版本已是 ${VER}，无回写需求（幂等）"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openssh.spec version.txt
+          git commit -m "build: OpenSSH ${VER}"
+          ok=0
+          for i in 1 2 3 4 5; do
+            if git fetch origin "$BRANCH" &&
+               git rebase "origin/$BRANCH" &&
+               git push origin "HEAD:$BRANCH"; then
+              ok=1
+              break
+            fi
+            echo "push 冲突，重试 $i/5"
+            sleep 15
+          done
+          [ "$ok" = 1 ] || { echo "push 重试耗尽" >&2; exit 1; }
+
+  keepalive:
+    # GitHub 规则：仓库 60 天无提交会自动停用 scheduled workflow。
+    # 常用的 gautamkrishnar/keepalive-workflow 维护者账号已于 2025-04 被平台封禁，
+    # 故用以下内联步骤实现等价逻辑（零第三方依赖、行为可审计）：
+    # 最近提交超过 45 天时创建一个空提交刷新活跃状态。
+    # 串行保证：needs release（成功或跳过）之后才运行，避免同 run 并发 push 竞争；
+    # 且 keepalive 自身的 push 亦带重试。
+    # 局限：仅对本仓库生效；scheduled workflow 首次启用后需有一次默认分支提交才会激活。
+    needs: [check, release]
+    if: >-
+      github.event_name == 'schedule' &&
+      needs.check.result == 'success' &&
+      (needs.release.result == 'success' || needs.release.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 保活（>45 天无提交则创建空提交）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$BRANCH"
+          last="$(git log -1 --format=%ct "origin/$BRANCH")"
+          now="$(date +%s)"
+          age=$(( (now - last) / 86400 ))
+          echo "默认分支最近提交距今 ${age} 天"
+          [ "$age" -lt 45 ] && { echo "近期有提交，无需保活"; exit 0; }
+          git commit --allow-empty \
+            -m "chore: keepalive（防止 scheduled workflow 因 60 天无提交被停用）"
+          ok=0
+          for i in 1 2 3; do
+            if git rebase "origin/$BRANCH" && git push origin "HEAD:$BRANCH"; then
+              ok=1; break
+            fi
+            sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "keepalive push 失败" >&2; exit 1; }
