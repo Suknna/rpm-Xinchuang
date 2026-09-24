@@ -1,13 +1,13 @@
-# OpenSSH EL7/EL8 RPM 自动构建与发布
+# EL7/EL8 RPM 每日检测与自动发布（OpenSSH + 六个组件）
 #
 # 触发：
-#   * schedule：北京时间每天 09:17（UTC 01:17）检查上游镜像，仅当出现数值更高的
-#     稳定 portable 版本时构建、测试、发布并回写 version.txt / openssh.spec；
+#   * schedule：北京时间每天 09:17（UTC 01:17）检测 OpenSSH portable 更新，
+#     同时调用 source-rpms.yml 检测其他六个组件的发行版源包；
 #   * workflow_dispatch：受控手动运行（可强制指定版本 / 仅构建不发布）。
 #
 # 安全边界：
 #   * 无 pull_request 触发——外部 PR 永远不会拿到本仓库的任何 token；
-#   * 默认仅 contents:read，只有 release/keepalive 两个受控 job 需要 contents:write；
+#   * 默认仅 contents:read，发布、回写及保活 job 才需要 contents:write；
 #   * GITHUB_TOKEN 仅对本仓库有效；
 #   * 所有第三方 action 固定到 commit SHA；UBI 基础镜像固定 digest。
 #
@@ -17,7 +17,7 @@
 #     绝不在资产不完整时回写版本）；
 #   * 版本回写基于 git diff，无变化时不产生提交；
 #   * keepalive 串行在 release 之后，避免同 run 并发 push 竞争。
-name: openssh-rpms
+name: EL7/EL8 RPM 每日构建与发布
 
 on:
   schedule:
@@ -48,6 +48,13 @@ env:
   UBI8_IMAGE: registry.access.redhat.com/ubi8/ubi@sha256:ed721ca811f29fa0fd8a4666aec2fb6771f3defbecc708a973d0b711d6f09293
 
 jobs:
+  source-rpms:
+    # 同一次 schedule 同时检查 SSH 与其他六个组件；各组件独立构建/发布。
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/source-rpms.yml
+    permissions:
+      contents: write
+
   check:
     runs-on: ubuntu-latest
     outputs:

@@ -1,10 +1,31 @@
-# rpm-Xinchuang — OpenSSH EL7/EL8 RPM 自动构建
+# rpm-Xinchuang — EL7/EL8 RPM 自动构建与发布
 
-为 **EL7 / EL8（仅 x86_64）** 自动构建带**静态链接 OpenSSL** 的 OpenSSH portable RPM。
-基于**官方 UBI 镜像**（`registry.access.redhat.com/ubi7/ubi`、`ubi8/ubi`），
-由 GitHub Actions 每天检查上游新版本，仅当出现**数值更高**的稳定版本时触发构建与发布。
+**构建、定时检测和发布运行在 GitHub Actions，不依赖本地电脑常驻。**
+仓库默认分支上的 [每日构建工作流](.github/workflows/openssh.yml) 于北京时间每天
+09:17（UTC 01:17）触发一次，并行检测以下软件包；有更新才在固定 digest 的
+官方 UBI7 / UBI8 镜像中构建 x86_64 RPM，并发布到本仓库的 GitHub Releases。
 
-## 产物特性
+| 组件 | 目标平台 | 更新来源 | Release tag 示例 |
+| --- | --- | --- | --- |
+| OpenSSH | EL7、EL8 | OpenSSH portable 稳定版 | `v10.5p1` |
+| chrony、vim、bash、sudo、telnet | EL7、EL8 | 对应平台的发行版源码 RPM | `telnet-el8-0.17-76.el8` |
+| ntp | EL7 | CentOS 7.9 源码 RPM | `ntp-el7-4.2.6p5-29.el7.centos.2` |
+
+OpenSSH 构建静态链接 OpenSSL 与 zlib 的专用 RPM，发布前运行产物及安装行为测试；
+其他组件由 [源码 RPM 工作流](.github/workflows/source-rpms.yml) 一次读取
+CentOS 7.9 vault / AlmaLinux 8.10 的源包元数据，下载 SRPM 并验证摘要及发行版签名，
+按原始 spec、补丁和源码分别构建。每个组件/平台独立发布 RPM 与 `SHA256SUMS`，
+成功后将 SRPM 指纹写入 `state/sources.json`；失败的组件不会推进检测基线或阻塞其他组件。
+
+**在 GitHub 上手动运行：**打开仓库的 *Actions* 页面，选择「六个组件源码 RPM
+构建与发布」→ *Run workflow*；`force` 可重新构建所有组件，`skip_release`
+可只验证构建而不发布。每日定时入口则是「EL7/EL8 RPM 每日构建与发布」，
+无需在本机配置 cron。源码包检测的是**发行版 SRPM 更新**（包括同版本重新打包），
+不是发行版之外的软件最新版本。EL7 仓库已归档，仅初次构建或镜像元数据变化会触发；
+EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上游安装脚本，
+特别是 bash、sudo 的升级，应先在目标环境验证。
+
+## OpenSSH 产物特性
 
 | 项目 | 说明 |
 | --- | --- |
@@ -14,7 +35,7 @@
 | 图形 askpass | **不构建**（x11 / gnome-askpass 均禁用） |
 | 目标平台 | 仅 x86_64；EL7（UBI7）与 EL8（UBI8）各一套 |
 
-## 工作流程（.github/workflows/openssh.yml）
+## OpenSSH 工作流程（.github/workflows/openssh.yml）
 
 1. 每天 **北京时间 09:17**（cron `17 1 * * *` UTC）运行 `scripts/check_update.py`
    解析 <https://mirrors.aliyun.com/pub/OpenBSD/OpenSSH/portable/> 目录，
@@ -107,8 +128,9 @@
 
 ## CI 权限与保活
 
-- workflow 默认 `contents: read`；仅 `release` / `keepalive` 两个受控 job
-  临时获得 `contents: write`（本仓库 GITHUB_TOKEN）；
+- workflow 默认 `contents: read`；OpenSSH 的 `release` / `keepalive`、
+  源码包的 `release` / `record` 发布回写 job 才使用 `contents: write`
+  （本仓库 GITHUB_TOKEN）；
 - **无 `pull_request` 触发**：外部 PR 永远不会拿到任何写权限 token；
   手动运行也只应由仓库所有者发起；
 - 所有第三方 action 固定 commit SHA：
@@ -138,7 +160,7 @@ scripts/local-build.sh el8     # 或 all
 # 行为测试（每场景独立干净容器）
 scripts/local-test.sh all       # fresh / upgrade / reinstall / uninstall × el7/el8
 
-# 版本检测单元测试
+# 版本及源码包检测单元测试
 python3 -m unittest discover -s tests -v
 ```
 
@@ -153,6 +175,10 @@ sshd 不被重启）、卸载（停止、注销、配置原位保留不被删除
 openssh.spec          RPM 规格（版本唯一来源）
 version.txt           已发布/当前记录的 OpenSSH 版本
 scripts/check_update.py   版本检测 + Release 查询（纯标准库）
+scripts/check_sources.py  六个组件源码包更新检测与构建矩阵生成
+scripts/build-source-rpm.sh  UBI 容器内校验并构建发行版 SRPM
+scripts/record_sources.py   合并已发布的源码包指纹
+state/sources.json      已发布源码包的指纹基线
 scripts/repos-common.sh   EL7/EL8 补充源定义（gpgcheck 全开）
 scripts/build-in-container.sh  UBI 容器内构建（验签→rpmbuild）
 scripts/test-install.sh        安装/升级行为测试（容器内执行）
