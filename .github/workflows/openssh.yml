@@ -49,6 +49,7 @@ env:
 
 jobs:
   source-rpms:
+    name: 六组件源码包检测与发布
     # 同一次 schedule 同时检查 SSH 与其他六个组件；各组件独立构建/发布。
     if: github.event_name == 'schedule'
     uses: ./.github/workflows/source-rpms.yml
