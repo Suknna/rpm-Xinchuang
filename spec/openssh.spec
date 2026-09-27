@@ -26,7 +26,7 @@
 %global ssl_ver 3.5.3
 # 静态链接的 zlib 版本（仅手动更新；系统 libz.a 非 PIC，无法链入 PIE，故从源码构建）
 %global zlib_ver 1.3.1
-%global rel 1%{?dist}
+%global rel 2%{?dist}
 
 # OpenSSH privilege separation requires a user & group ID
 %global sshd_uid    74
@@ -46,6 +46,8 @@ URL: https://www.openssh.com/portable.html
 Source0: https://cloudflare.cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-%{ver}.tar.gz
 Source1: https://github.com/openssl/openssl/releases/download/openssl-%{ssl_ver}/openssl-%{ssl_ver}.tar.gz
 Source2: https://github.com/madler/zlib/releases/download/v%{zlib_ver}/zlib-%{zlib_ver}.tar.gz
+# EL7/EL8 PAM stack (Fedora/RHEL packaging); upstream contrib/redhat/sshd.pam uses removed pam_stack.so.
+Source3: sshd.pam
 License: BSD
 Group: Applications/Internet
 BuildRoot: %{_tmppath}/%{name}-%{version}-buildroot
@@ -207,13 +209,17 @@ done
 # 源码树兜底（防止上游安装策略变化导致模板缺失）
 [ -f "$RPM_BUILD_ROOT%{_datadir}/openssh/sshd_config" ] || \
 	install -m600 sshd_config.out "$RPM_BUILD_ROOT%{_datadir}/openssh/sshd_config"
+# Upstream defaults to no PAM; fresh EL installations must use their system policy.
+# Existing /etc/ssh/sshd_config is a ghost and will never be changed by this.
+grep -q '^#UsePAM no$' "$RPM_BUILD_ROOT%{_datadir}/openssh/sshd_config" || exit 1
+sed -i 's/^#UsePAM no$/UsePAM yes/' "$RPM_BUILD_ROOT%{_datadir}/openssh/sshd_config"
 [ -f "$RPM_BUILD_ROOT%{_datadir}/openssh/ssh_config" ] || \
 	install -m644 ssh_config.out "$RPM_BUILD_ROOT%{_datadir}/openssh/ssh_config"
 [ -f "$RPM_BUILD_ROOT%{_datadir}/openssh/moduli" ] || \
 	install -m644 moduli "$RPM_BUILD_ROOT%{_datadir}/openssh/moduli"
 # init 脚本与 PAM 配置同样只作为模板分发
 install -m755 contrib/redhat/sshd.init $RPM_BUILD_ROOT%{_datadir}/openssh/sshd.init
-install -m644 contrib/redhat/sshd.pam  $RPM_BUILD_ROOT%{_datadir}/openssh/sshd.pam
+install -m644 %{SOURCE3} $RPM_BUILD_ROOT%{_datadir}/openssh/sshd.pam
 
 install -D -m 755 contrib/ssh-copy-id $RPM_BUILD_ROOT/usr/bin/ssh-copy-id
 install -D -m 644 contrib/ssh-copy-id.1 $RPM_BUILD_ROOT/usr/share/man/man1/ssh-copy-id.1
@@ -366,6 +372,10 @@ fi
 %attr(0755,root,root) %{_datadir}/openssh/sshd.init
 
 %changelog
+* Sun Sep 27 2026 Suknna <Suknna@users.noreply.github.com> - 10.5p1-2
+- Use the EL7/EL8 password-auth PAM stack in the fresh-install sshd template;
+  upstream contrib/redhat/sshd.pam still refers to removed pam_stack.so.
+
 * Sat Sep 12 2026 Suknna <Suknna@users.noreply.github.com> - 10.0p1-1
 - Repackage for UBI7/UBI8 with static OpenSSL 3.5.3 (zlib enabled), dynamic
   glibc/PAM/Kerberos5, and no graphical askpass subpackages.

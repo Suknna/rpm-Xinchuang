@@ -26,12 +26,12 @@ source "$(dirname "$0")/repos-common.sh"
 echo "== [$EL] 配置 yum/dnf 源（gpgcheck 全开）"
 "configure_repos_$EL"
 echo "== [$EL] 安装构建依赖"
-install_build_deps "$EL" "$SRC/openssh.spec"
+install_build_deps "$EL" "$SRC/spec/openssh.spec"
 
 # spec 是版本唯一来源（避免两处维护漂移）
-VER="$(sed -n 's/^%global ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
-SSL_VER="$(sed -n 's/^%global ssl_ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
-ZLIB_VER="$(sed -n 's/^%global zlib_ver[[:space:]]\+//p' openssh.spec | head -1 | tr -d '[:space:]')"
+VER="$(sed -n 's/^%global ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr -d '[:space:]')"
+SSL_VER="$(sed -n 's/^%global ssl_ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr -d '[:space:]')"
+ZLIB_VER="$(sed -n 's/^%global zlib_ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr -d '[:space:]')"
 [ -n "$VER" ] && [ -n "$SSL_VER" ] && [ -n "$ZLIB_VER" ] || { echo "ERROR: cannot parse ver/ssl_ver from spec" >&2; exit 2; }
 echo "== [$EL] OpenSSH=$VER OpenSSL=$SSL_VER zlib=$ZLIB_VER"
 
@@ -39,6 +39,7 @@ echo "== [$EL] OpenSSH=$VER OpenSSL=$SSL_VER zlib=$ZLIB_VER"
 RPM_TOP="$SRC/.rpmbuild/$EL"
 mkdir -p "$RPM_TOP"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 SOURCES="$RPM_TOP/SOURCES"
+install -m644 "$SRC/source-assets/openssh/sshd.pam" "$SOURCES/sshd.pam"
 
 fetch() { # fetch <output> <url> [<url>...] 依次尝试直到成功
 	local out="$1"; shift
@@ -97,7 +98,7 @@ for TGZ in "$SSL_TGZ" "$ZLIB_TGZ"; do
 done
 
 echo "== [$EL] rpmbuild"
-cp -f "$SRC/openssh.spec" "$RPM_TOP/SPECS/"
+cp -f "$SRC/spec/openssh.spec" "$RPM_TOP/SPECS/"
 rpmbuild -bb \
 	--define "dist .${EL}" \
 	--define 'debug_package %{nil}' \
