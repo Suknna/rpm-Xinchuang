@@ -25,15 +25,16 @@ if [ -n "${PKGS:-}" ]; then
 	if command -v dnf >/dev/null 2>&1; then dnf -y -q install $PKGS; else yum -y -q install $PKGS; fi
 fi
 
-SPEC="${SRC_DIR:-/src}/openssh.spec"
+SPEC="${SRC_DIR:-/src}/spec/openssh.spec"
 VER="$(sed -n 's/^%global ver[[:space:]]\+//p' "$SPEC" | head -1 | tr -d '[:space:]')"
+REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' "$SPEC" | head -1)"
 
 echo "== [$EL] 1) 三包齐全与 EVR/arch"
 for p in openssh openssh-clients openssh-server; do
-	f="$DIST/$p-$VER-1.$EL.x86_64.rpm"
+	f="$DIST/$p-$VER-$REL.$EL.x86_64.rpm"
 	if [ -f "$f" ]; then pass "$(basename "$f") 存在"; else fail "缺失 $f"; continue; fi
 	got="$(rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$f")"
-	[ "$got" = "$p-$VER-1.$EL.x86_64" ] && pass "EVR/arch: $got" || fail "EVR/arch 期望 $p-$VER-1.$EL.x86_64，实际 $got"
+	[ "$got" = "$p-$VER-$REL.$EL.x86_64" ] && pass "EVR/arch: $got" || fail "EVR/arch 期望 $p-$VER-$REL.$EL.x86_64，实际 $got"
 done
 
 echo "== [$EL] 2) SHA256SUMS"
@@ -46,7 +47,9 @@ echo "== [$EL] 3/4) ELF 动态依赖检查（静态 libcrypto/libssl/zlib + 动�
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/x"
-for rpm in "$DIST"/openssh-*.rpm; do
+for rpm in "$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" \
+           "$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
+           "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; do
 	( cd "$TMP/x" && rpm2cpio "$rpm" | cpio -idm --quiet ) || { fail "解包失败: $rpm"; }
 done
 FOUND_SSL=0; FOUND_Z=0
@@ -69,8 +72,10 @@ done
 echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）"
 # FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=64 → ghost 配置为 81。
 # 目录（flags=0，perms 以 d 开头）允许真实存在（如 /etc/ssh）。
-BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES:perms}\n]' "$DIST"/openssh-server-*.rpm \
-	"$DIST"/openssh-clients-*.rpm "$DIST"/openssh-$VER-1.$EL.x86_64.rpm 2>/dev/null |
+BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES:perms}\n]' \
+	"$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm" \
+	"$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
+	"$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" 2>/dev/null |
 	while IFS=$'\t' read -r path flags perms; do
 		case "$path" in
 		/etc/*)
@@ -91,7 +96,9 @@ fi
 
 echo "== [$EL] 6) 模板与 ghost 声明、运行依赖"
 FILELIST=""
-for r in "$DIST"/openssh-$VER-1.$EL.x86_64.rpm "$DIST"/openssh-clients-*.rpm "$DIST"/openssh-server-*.rpm; do
+for r in "$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" \
+         "$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
+         "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; do
 	# 数组标签必须用 [] 重复括号；[] 内不可混入标量（el8 rpm 4.14 直接报错）
 	FILELIST="$FILELIST$(rpm -qp --qf '[%{FILENAMES}\n]' "$r")"$'\n'
 done
@@ -103,10 +110,15 @@ done
 for g in /etc/ssh/sshd_config /etc/ssh/ssh_config /etc/ssh/moduli /etc/pam.d/sshd /etc/rc.d/init.d/sshd; do
 	echo "$FILELIST" | grep -qx "$g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
 done
-REQ="$(rpm -qp --requires "$DIST"/openssh-server-*.rpm)"
+REQ="$(rpm -qp --requires "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm")"
 echo "$REQ" | grep -q "initscripts" && pass "Requires initscripts" || fail "缺 Requires initscripts"
 echo "$REQ" | grep -q "chkconfig" && pass "Requires chkconfig" || fail "缺 Requires chkconfig"
 echo "$REQ" | grep -qE "pam|system-auth" && pass "Requires pam" || fail "缺 Requires pam"
+if bash "${SRC_DIR:-/src}/scripts/verify-pam-rpms.sh" openssh "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; then
+	pass "sshd PAM 模板无旧模块且含发行版认证栈"
+else
+	fail "sshd PAM 模板无效"
+fi
 
 echo "== [$EL] verify 结果: $FAIL failure(s)"
 exit $((FAIL > 0))

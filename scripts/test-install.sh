@@ -126,12 +126,21 @@ fresh)
 	PM_INSTALL || { fail "rpm 安装失败"; exit 1; }
 
 	assert_file "sshd_config 默认配置已安装" /etc/ssh/sshd_config
+	grep -qx 'UsePAM yes' /etc/ssh/sshd_config &&
+		pass "全新安装启用系统 PAM" || fail "全新安装没有启用 PAM"
 	assert_eq "sshd_config 权限 600" "600" "$(stat -c %a /etc/ssh/sshd_config)"
 	cmp -s /etc/ssh/sshd_config /usr/share/openssh/sshd_config &&
 		pass "默认配置与 /usr/share 模板一致" ||
 		fail "默认配置与模板不一致"
 	assert_file "ssh_config 已安装" /etc/ssh/ssh_config
 	assert_file "PAM 配置已安装" /etc/pam.d/sshd
+	if grep -q 'pam_stack.so' /etc/pam.d/sshd; then
+		fail "sshd PAM 栈使用已移除的 pam_stack.so"
+	else
+		pass "sshd PAM 栈不使用 pam_stack.so"
+	fi
+	grep -Eq '^auth[[:space:]]+substack[[:space:]]+password-auth$' /etc/pam.d/sshd &&
+		pass "sshd PAM 使用 password-auth" || fail "sshd PAM 缺少 password-auth"
 	assert_file "init 脚本已安装" /etc/rc.d/init.d/sshd
 	assert_file "moduli 已安装" /etc/ssh/moduli
 	assert_eq "安装后不生成 host key" "0" \

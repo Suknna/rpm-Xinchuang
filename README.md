@@ -1,51 +1,55 @@
 # rpm-Xinchuang — EL7/EL8 RPM 自动构建与发布
 
-**构建、定时检测和发布运行在 GitHub Actions，不依赖本地电脑常驻。**
-仓库默认分支上的 [每日构建工作流](.github/workflows/openssh.yml) 于北京时间每天
-09:17（UTC 01:17）触发一次，并行检测以下软件包；有更新才在固定 digest 的
-官方 UBI7 / UBI8 镜像中构建 x86_64 RPM，并发布到本仓库的 GitHub Releases。
+**定时检测、构建和发布都在 GitHub Actions 运行，不依赖本机。**唯一的
+[rpm-Xinchuang 工作流](.github/workflows/rpm-xinchuang.yml) 在北京时间每天 09:17
+（UTC 01:17）运行一次。它通过 [Anitya](https://release-monitoring.org/) 固定项目 ID
+检查七个组件的最新稳定版，与根目录 [`version.json`](version.json) 按平台对比；
+有更新才在官方 UBI7 / UBI8 镜像中构建 x86_64 RPM。
 
 | 组件 | 目标平台 | 更新来源 | Release tag 示例 |
 | --- | --- | --- | --- |
-| OpenSSH | EL7、EL8 | OpenSSH portable 稳定版 | `v10.5p1` |
-| chrony、vim、bash、sudo、telnet | EL7、EL8 | 对应平台的发行版源码 RPM | `telnet-el8-0.17-76.el8` |
-| ntp | EL7 | CentOS 7.9 源码 RPM | `ntp-el7-4.2.6p5-29.el7.centos.2` |
+| OpenSSH | EL7、EL8 | OpenSSH portable | `v10.5p1` |
+| chrony、vim、bash、sudo、ntp | EL7、EL8 | 各组件官方发布的源码包 | `bash-el8-5.3-1.el8` |
+| telnet | EL7、EL8 | GNU inetutils 的 telnet/telnetd | `telnet-el8-2.8-1.el8` |
 
-OpenSSH 构建静态链接 OpenSSL 与 zlib 的专用 RPM，发布前运行产物及安装行为测试；
-其他组件由 [源码 RPM 工作流](.github/workflows/source-rpms.yml) 一次读取
-CentOS 7.9 vault / AlmaLinux 8.10 的源包元数据，下载 SRPM 并验证摘要及发行版签名，
-按原始 spec、补丁和源码分别构建。每个组件/平台独立发布 RPM 与 `SHA256SUMS`，
-成功后将 SRPM 指纹写入 `state/sources.json`；失败的组件不会推进检测基线或阻塞其他组件。
+所有 RPM 都使用仓库 [`spec/`](spec/) 中维护的 spec 构建；其余组件的发行版辅助
+配置/服务文件存于 [`source-assets/`](source-assets/)。下载的是**上游官方最新版源码**，
+并非反复抓取 CentOS/Alma 的旧 SRPM 或重放针对旧版本的发行版补丁。
+OpenSSH 保留静态链接 OpenSSL/zlib 的专用 spec 与完整安装行为测试；其余组件还会
+在**干净 UBI 容器中安装并运行**。构建及安装验证均成功后，每个组件/平台独立发布
+RPM、`SHA256SUMS`、源码摘要和实际构建 spec，并回写 `version.json` 和对应 spec。
+失败的平台不更新版本基线，等待后续修复重试。
 
-**在 GitHub 上手动运行：**打开仓库的 *Actions* 页面，选择「六个组件源码 RPM
-构建与发布」→ *Run workflow*；`force` 可重新构建所有组件，`skip_release`
-可只验证构建而不发布。每日定时入口则是「EL7/EL8 RPM 每日构建与发布」，
-无需在本机配置 cron。源码包检测的是**发行版 SRPM 更新**（包括同版本重新打包），
-不是发行版之外的软件最新版本。EL7 仓库已归档，仅初次构建或镜像元数据变化会触发；
-EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上游安装脚本，
-特别是 bash、sudo 的升级，应先在目标环境验证。
+**手动运行：**GitHub *Actions* →「rpm-Xinchuang」→ *Run workflow*；`version`
+可指定 OpenSSH 版本，`force` 可重建六个组件，`skip_release` 只验证不发布。
+修复 PAM 时单独勾选 `repair_pam`（不要同时填写 `version` 或勾选 `force`）：
+只构建 OpenSSH EL7/EL8 和 sudo EL8，分别执行载荷检查与干净 UBI 安装测试。
+默认会发布新版 release（OpenSSH `v10.5p1-2`，sudo `sudo-el8-1.9.17p2-2.el8`）；
+勾选 `skip_release` 可以先只运行 CI 验证。构建后的 RPM 可从 workflow artifacts 获取。
+根目录 [`time`](time) 记录上一次**完整成功的定时调度**（UTC），无更新时也会更新并
+产生提交，取代旧的 45 天空提交保活。EL7 已停止维护；构建仍使用固定 UBI7 镜像
+及其补充仓库。telnet 改用 GNU inetutils，包名仍为 `telnet` / `telnet-server`。
+升级 bash、sudo 等系统基础包之前，应先在目标环境验证。
 
 ## OpenSSH 产物特性
 
 | 项目 | 说明 |
 | --- | --- |
-| OpenSSH | portable 稳定版（CI 自动跟踪，当前 spec 见 `version.txt`） |
+| OpenSSH | portable 稳定版（CI 自动跟踪，spec 见 `spec/openssh.spec`，版本见 `version.json`） |
 | OpenSSL / zlib | **静态链接**（OpenSSL 当前 3.5.3 含 zlib；zlib 亦静态链接，二进制不依赖系统 libz.so），OpenSSL 版本固定在 spec 内、**仅手动升级** |
 | glibc / PAM / Kerberos5 | **动态链接**（不替换系统基础库；sshd 动态链接 libpam） |
 | 图形 askpass | **不构建**（x11 / gnome-askpass 均禁用） |
 | 目标平台 | 仅 x86_64；EL7（UBI7）与 EL8（UBI8）各一套 |
 
-## OpenSSH 工作流程（.github/workflows/openssh.yml）
+## OpenSSH 构建分支（.github/workflows/rpm-xinchuang.yml）
 
-1. 每天 **北京时间 09:17**（cron `17 1 * * *` UTC）运行 `scripts/check_update.py`
-   解析 <https://mirrors.aliyun.com/pub/OpenBSD/OpenSSH/portable/> 目录，
-   按 `(X, Y, Z)` 数值比较（避免 `10.10p1 < 10.9p1` 字符串误判）与根目录
-   `version.txt` 对比；
+ 1. 每天 **北京时间 09:17**（cron `17 1 * * *` UTC）运行
+    `scripts/check_versions.py`，同时比较七个 Anitya 项目和 `version.json`；
 2. 仅当上游更高时：在 UBI7 / UBI8 容器内**并行真实构建** RPM
    （源码包先验证官方 GPG 签名 / 固定 SHA256）；
 3. **EL7 与 EL8 都构建成功**才创建 GitHub Release（tag `vX.YpZ`），
    附上全部 RPM 与 SHA256SUMS；任一失败则不发布、不推进；
-4. 发布成功后回写 `openssh.spec` 的 `%global ver` 与 `version.txt` 并提交；
+ 4. 发布成功后回写 `spec/openssh.spec` 的 `%global ver` 与 `version.json` 并提交；
 5. 手动触发（workflow_dispatch）可强制指定版本或“仅构建不发布”。
 
 幂等与并发：同组运行排队执行（不取消）；Release 按tag查询后创建（重复运行不重复发）；
@@ -58,6 +62,9 @@ EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上�
 - **EL7**：UBI7 自带主源已 404（EOL），补充 CentOS 7.9.2009 vault（base/updates/extras）
   与 SCLo vault（devtoolset-9，系统 gcc 4.8 不满足 OpenSSL 3.5 的 C11 要求）；
 - **EL8**：UBI8 自带源缺 `pam-devel`，补充 AlmaLinux 8（BaseOS/AppStream/PowerTools）；
+- **EL7 NTP**：系统 OpenSSL 1.0.2 不支持上游 NTP 所需的接口；构建时用
+  `certs/checksums.yaml` 固定摘要的 OpenSSL 3.5.3 源码构建私有静态库，
+  避免要求目标系统升级 OpenSSL；
 - 其余：rpm-build、gnupg2、krb5-devel、perl 模块（IPC::Cmd / Time::Piece /
   Data::Dumper）、cpio 等（见 spec 的 BuildRequires 与 `scripts/repos-common.sh`）；
   zlib 从源码以 -fPIC 静态构建（EL7 系统 libz.a 非 PIC，无法链入 PIE，
@@ -76,10 +83,17 @@ EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上�
   ——不会产生 `.rpmnew` / `.rpmsave`，卸载也不会删除配置；
 - 默认配置以模板形式安装到 `/usr/share/openssh/`（`sshd_config`、`ssh_config`、
   `moduli`、`sshd.pam`、`sshd.init`）；
+- SSH 的 `sshd.pam` 模板采用发行版 `password-auth`/`postlogin` 栈，而非上游
+  `contrib/redhat/sshd.pam` 中已失效的 `pam_stack.so`；全新安装的 `sshd_config`
+  模板显式设置 `UsePAM yes`，已有配置保持原样；
 - `%post` 脚本段**仅在目标文件缺失时**从模板补齐（典型为全新安装）；已存在的
   文件在任何场景下都不会被本包写入；
 - 升级时 `%post` 会用新二进制对保留配置执行 `sshd -t` 预检并**透明打印结果**
   （失败仅警告，不阻止安装、不自动修复、不重启服务）；
+- **已安装坏包生成的 `/etc/pam.d/sshd` 不会被新包自动覆盖。**更新包只修复全新
+  安装/缺失文件场景；对已写入 `pam_stack.so` 的现存机器，需通过控制台或其他安全
+  通道备份并人工修复 PAM 配置，验证可登录后再断开现有会话。sudo 同理：现存配置
+  应先检查，不能仅凭升级包判断现场认证已经恢复。
 - init 脚本同样遵循该策略：升级后 `/etc/rc.d/init.d/sshd` 仍是你现有的脚本
   （旧发行版脚本与新二进制路径兼容，可正常工作）；如需启用新模板，管理员可
   手动比对 `/usr/share/openssh/sshd.init` 后自行替换。
@@ -113,7 +127,7 @@ EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上�
 
 ## 静态 OpenSSL 升级（仅手动）
 
-1. 修改 `openssh.spec`：`%global ssl_ver X.Y.Z`；
+1. 修改 `spec/openssh.spec`：`%global ssl_ver X.Y.Z`；
 2. 下载官方签名的 `openssl-X.Y.Z.tar.gz`，**验证签名后**把 SHA256 更新到
    `certs/checksums.yaml`（构建时强校验，未登记的版本会直接构建失败）；
 3. OpenSSH 版本更新**不要求**升级 OpenSSL；OpenSSL 不单独发布 Release。
@@ -128,8 +142,7 @@ EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上�
 
 ## CI 权限与保活
 
-- workflow 默认 `contents: read`；OpenSSH 的 `release` / `keepalive`、
-  源码包的 `release` / `record` 发布回写 job 才使用 `contents: write`
+- workflow 默认 `contents: read`；发布回写及更新 `time` 的 job 才使用 `contents: write`
   （本仓库 GITHUB_TOKEN）；
 - **无 `pull_request` 触发**：外部 PR 永远不会拿到任何写权限 token；
   手动运行也只应由仓库所有者发起；
@@ -140,12 +153,10 @@ EL8 上游不提供 `ntp` 源包，由 `chrony` 代替。其他组件沿用上�
 ### 定时任务与保活的局限（如实说明）
 
 - GitHub 会在**仓库 60 天无提交**后自动停用 scheduled workflow；
-  `keepalive` job 在最近提交超过 45 天时创建一个空提交来刷新活跃状态
-  （原常用 `gautamkrishnar/keepalive-workflow` 维护者账号已于 2025-04 被平台封禁，
-  故改为等价的内联实现，逻辑可审计）；
+  每次完整成功的调度都会写入 `time` 并提交，避免长期无提交；
 - 定时任务**不保证准点**：GitHub schedule 高峰期可能延迟数分钟到数十分钟；
-- scheduled workflow **只在默认分支**生效；若 60 天内无任何提交且 keepalive 也被
-  停用（例如仓库被 archived），需要手动重新启用；
+- scheduled workflow **只在默认分支**生效；若工作流被停用或仓库被归档，
+  需要手动重新启用；
 - fork 仓库默认不运行 scheduled workflow。
 
 ## 本地构建与测试
@@ -172,13 +183,16 @@ sshd 不被重启）、卸载（停止、注销、配置原位保留不被删除
 ## 仓库结构
 
 ```
-openssh.spec          RPM 规格（版本唯一来源）
-version.txt           已发布/当前记录的 OpenSSH 版本
-scripts/check_update.py   版本检测 + Release 查询（纯标准库）
-scripts/check_sources.py  六个组件源码包更新检测与构建矩阵生成
-scripts/build-source-rpm.sh  UBI 容器内校验并构建发行版 SRPM
-scripts/record_sources.py   合并已发布的源码包指纹
-state/sources.json      已发布源码包的指纹基线
+spec/openssh.spec         OpenSSH 包装、静态链接依赖与配置策略
+spec/<组件>/<el>.spec     六组件各平台的仓库维护 spec
+source-assets/            从发行版 spec 保留的服务文件及配置模板（不含补丁）
+version.json              七组件按平台记录的已发布版本
+time                      最近一次完整成功调度的 UTC 时间
+.github/workflows/rpm-xinchuang.yml  唯一的 GitHub Actions 工作流
+scripts/check_versions.py Anitya 七项目版本检测与构建矩阵生成
+scripts/build-upstream.sh UBI 内编译官方上游源码并打 RPM
+scripts/test-upstream-install.sh  全新 UBI 中安装及命令测试
+scripts/record_versions.py  合并已发布版本和实际构建 spec
 scripts/repos-common.sh   EL7/EL8 补充源定义（gpgcheck 全开）
 scripts/build-in-container.sh  UBI 容器内构建（验签→rpmbuild）
 scripts/test-install.sh        安装/升级行为测试（容器内执行）
