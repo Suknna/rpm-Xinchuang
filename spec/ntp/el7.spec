@@ -1,7 +1,7 @@
 Summary: The NTP daemon and utilities
 Name: ntp
 Version: 4.2.8p18
-Release: 1%{?dist}
+Release: 2%{?dist}
 %global ntp_ssl_ver 3.5.3
 %global ntp_ssl_dir %{_builddir}/openssl-%{ntp_ssl_ver}-install
 # primary license (COPYRIGHT) : MIT
@@ -34,6 +34,7 @@ License: (MIT and BSD and BSD with advertising) and GPLv2
 Group: System Environment/Daemons
 Source0: https://downloads.nwtime.org/ntp/ntp-%{version}.tar.gz
 Source30: https://github.com/openssl/openssl/releases/download/openssl-%{ntp_ssl_ver}/openssl-%{ntp_ssl_ver}.tar.gz
+Patch1: ntp-openssl3-shake-xof.patch
 Source1: ntp.conf
 Source2: ntp.keys
 Source4: ntpd.sysconfig
@@ -206,6 +207,7 @@ This package contains NTP documentation in HTML format.
 
 %prep
 %setup -q -a 5
+%patch -P 1 -p1
 tar -xzf %{SOURCE30} -C ..
 
 # hardcode paths in ntpstat
@@ -244,6 +246,18 @@ make %{?_smp_mflags}
 sed -i 's|$ntpq = "ntpq"|$ntpq = "%{_sbindir}/ntpq"|' scripts/ntptrace/ntptrace
 sed -i 's|ntpq -c |%{_sbindir}/ntpq -c |' scripts/ntp-wait/ntp-wait
 
+%check
+make check
+# Upstream's generic digest helper reports unavailable MACs as IGNORE; SHAKE128
+# must actually work with the privately linked OpenSSL, not merely be skipped.
+digest_results="$(cd tests/libntp && ./test-digests 2>&1)" || {
+  printf '%s\n' "$digest_results"
+  exit 1
+}
+printf '%s\n' "$digest_results" | grep -F 'test_Digest_SHAKE128:PASS' || {
+  printf '%s\n' "$digest_results"
+  exit 1
+}
 
 %install
 make DESTDIR=$RPM_BUILD_ROOT bindir=%{_sbindir} install
@@ -396,6 +410,10 @@ popd
 %{_docdir}/ntp/
 
 %changelog
+* Sun Sep 27 2026 Suknna <Suknna@users.noreply.github.com> - 4.2.8p18-2
+- Finalize SHAKE128 XOF MACs with explicit output length under static OpenSSL 3.5.
+- Run upstream make check to gate NTP authentication regressions.
+
 * Tue Jun 23 2020 CentOS Sources <bugs@centos.org> - 4.2.6p5-29.el7.centos.2
 - rebrand vendorzone
 

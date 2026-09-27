@@ -1,0 +1,55 @@
+--- a/sntp/crypto.c
++++ b/sntp/crypto.c
+@@ -101,7 +101,16 @@ compute_mac(
+ 			goto mac_fail;
+ 		}
+-		if (!EVP_DigestFinal(ctx, digest, &len)) {
++		/* SHAKE is an XOF: OpenSSL 3.5 requires an explicit output length.
++		 * The default digest length preserves NTP's 16-byte SHAKE128 MAC. */
++		if (EVP_MD_get_flags(EVP_MD_CTX_get0_md(ctx)) & EVP_MD_FLAG_XOF) {
++			int xof_size = EVP_MD_get_size(EVP_MD_CTX_get0_md(ctx));
++			if (xof_size > 0 && (size_t)xof_size <= dig_sz &&
++			    EVP_DigestFinalXOF(ctx, digest, (size_t)xof_size))
++				len = (u_int)xof_size;
++			else
++				msyslog(LOG_ERR, "make_mac: MAC %s XOF Final failed.", macname);
++		} else if (!EVP_DigestFinal(ctx, digest, &len)) {
+ 			msyslog(LOG_ERR, "make_mac: MAC %s Digest Final failed.",
+ 				macname);
+ 			len = 0;
+ 		}
+--- a/libntp/a_md5encrypt.c
++++ b/libntp/a_md5encrypt.c
+@@ -137,9 +137,11 @@ make_mac(
+ 		ctx = get_md_ctx(ktype);
+ 		if (NULL == ctx) {
+ 			goto mac_fail;
+ 		}
+-		if ((size_t)EVP_MD_CTX_size(ctx) > digest->len) {
++		/* EVP_MD_CTX_size is -1 for an XOF, not its wire MAC length. */
++		if (!(EVP_MD_get_flags(EVP_MD_CTX_get0_md(ctx)) & EVP_MD_FLAG_XOF) &&
++		    (size_t)EVP_MD_CTX_size(ctx) > digest->len) {
+ 			msyslog(LOG_ERR, "MAC encrypt: MAC %s buf too small.",
+ 				OBJ_nid2sn(ktype));
+ 			goto mac_fail;
+ 		}
+@@ -153,8 +153,18 @@ make_mac(
+ 				OBJ_nid2sn(ktype));
+ 			goto mac_fail;
+ 		}
+-		if (!EVP_DigestFinal(ctx, digest->buf, &uilen)) {
++		/* EVP_DigestFinal cannot finish an XOF in OpenSSL 3.5. Keep
++		 * SHAKE128's 16-byte wire format by requesting the default size. */
++		if (EVP_MD_get_flags(EVP_MD_CTX_get0_md(ctx)) & EVP_MD_FLAG_XOF) {
++			int xof_size = EVP_MD_get_size(EVP_MD_CTX_get0_md(ctx));
++			if (xof_size > 0 && (size_t)xof_size <= digest->len &&
++			    EVP_DigestFinalXOF(ctx, digest->buf, (size_t)xof_size))
++				uilen = (u_int)xof_size;
++			else
++				msyslog(LOG_ERR, "MAC encrypt: MAC %s XOF Final failed.",
++					OBJ_nid2sn(ktype));
++		} else if (!EVP_DigestFinal(ctx, digest->buf, &uilen)) {
+ 			msyslog(LOG_ERR, "MAC encrypt: MAC %s Digest Final failed.",
+ 				OBJ_nid2sn(ktype));
+ 			uilen = 0;
+ 		}

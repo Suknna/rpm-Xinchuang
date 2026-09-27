@@ -225,6 +225,8 @@ make %{?_smp_mflags}
 sed -i 's|$ntpq = "ntpq"|$ntpq = "%{_sbindir}/ntpq"|' scripts/ntptrace/ntptrace
 sed -i 's|ntpq -c |%{_sbindir}/ntpq -c |' scripts/ntp-wait/ntp-wait
 
+%check
+make check
 
 %install
 make DESTDIR=$RPM_BUILD_ROOT bindir=%{_sbindir} install

@@ -51,6 +51,8 @@ else
   fi
   dnf -y -q builddep "$SPEC"
 fi
+# Reused local build trees may retain older releases; never collect stale RPMs.
+rm -f "$TOP"/RPMS/{x86_64,noarch}/*.rpm
 rpmbuild -bb --define "_topdir $TOP" --define "dist .$EL" "$SPEC"
 shopt -s nullglob
 rpms=("$TOP"/RPMS/{x86_64,noarch}/*.rpm)

@@ -299,6 +299,12 @@ make clean
 make VIMRCLOC=/etc VIMRUNTIMEDIR=/usr/share/vim/%{vimdir} %{?_smp_mflags}
 cp vim enhanced-vim
 
+%check
+# Run upstream tests against the final huge (non-GUI) binary before packaging
+# relocates runtime/doc.  The complete upstream suite needs a richer tty/GUI
+# environment and is tracked separately from these deterministic gates.
+make -C src/testdir test_normal.res test_vim9_script.res
+
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/%{_bindir}

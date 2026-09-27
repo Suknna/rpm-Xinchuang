@@ -14,11 +14,17 @@
 
 所有 RPM 都使用仓库 [`spec/`](spec/) 中维护的 spec 构建；其余组件的发行版辅助
 配置/服务文件存于 [`source-assets/`](source-assets/)。下载的是**上游官方最新版源码**，
-并非反复抓取 CentOS/Alma 的旧 SRPM 或重放针对旧版本的发行版补丁。
+并非反复抓取 CentOS/Alma 的旧 SRPM；EL7 NTP 有一处针对静态 OpenSSL 3.5
+SHAKE128 XOF 兼容的仓库维护补丁。
 OpenSSH 保留静态链接 OpenSSL/zlib 的专用 spec 与完整安装行为测试；其余组件还会
 在**干净 UBI 容器中安装并运行**。构建及安装验证均成功后，每个组件/平台独立发布
 RPM、`SHA256SUMS`、源码摘要和实际构建 spec，并回写 `version.json` 和对应 spec。
 失败的平台不更新版本基线，等待后续修复重试。
+测试分层：OpenSSH 构建后运行上游 `make tests`，bash/sudo/NTP/GNU inetutils
+在 spec 的 `%check` 运行上游 `make check`，chrony 运行上游单元测试，vim
+运行已在 EL7/EL8 验证的上游核心用例。另在独立干净 UBI 容器中测试已安装
+RPM：SSH 与 sudo 使用普通用户真实密码认证，chrony/telnet 检查本地服务响应；
+详细来源与未覆盖的全量测试见 [`docs/package-test-research.md`](docs/package-test-research.md)。
 
 **手动运行：**GitHub *Actions* →「rpm-Xinchuang」→ *Run workflow*；`version`
 可指定 OpenSSH 版本，`force` 可重建六个组件，`skip_release` 只验证不发布。

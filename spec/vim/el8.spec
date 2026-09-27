@@ -478,6 +478,10 @@ make clean
 make VIMRCLOC=/etc VIMRUNTIMEDIR=/usr/share/vim/%{vimdir} %{?_smp_mflags}
 cp vim enhanced-vim
 
+%check
+# Test the final huge (non-GUI) binary while upstream runtime/doc still exists.
+make -C src/testdir test_normal.res test_vim9_script.res
+
 %install
 mkdir -p %{buildroot}/%{_bindir}
 mkdir -p %{buildroot}/%{_datadir}/%{name}/vimfiles/{after,autoload,colors,compiler,doc,ftdetect,ftplugin,indent,keymap,lang,plugin,print,spell,syntax,tutor}

@@ -99,14 +99,20 @@ done
 
 echo "== [$EL] rpmbuild"
 cp -f "$SRC/spec/openssh.spec" "$RPM_TOP/SPECS/"
+# A reused local build tree must not publish old releases alongside this one.
+rm -f "$RPM_TOP"/RPMS/x86_64/openssh-*.rpm
 rpmbuild -bb \
 	--define "dist .${EL}" \
 	--define 'debug_package %{nil}' \
 	--define "_topdir $RPM_TOP" \
 	"$RPM_TOP/SPECS/openssh.spec"
 
+echo "== [$EL] OpenSSH 上游 regress 测试"
+bash "$SRC/scripts/test-openssh-upstream.sh" "$EL" "$RPM_TOP/BUILD/openssh-$VER"
+
 echo "== [$EL] 收集产物"
 mkdir -p "$SRC/dist/$EL"
+rm -f "$SRC/dist/$EL"/openssh-*.rpm
 cp -f "$RPM_TOP"/RPMS/x86_64/*.rpm "$SRC/dist/$EL/"
 ( cd "$SRC/dist/$EL" && sha256sum ./*.rpm | tee SHA256SUMS )
 echo "== [$EL] DONE"
