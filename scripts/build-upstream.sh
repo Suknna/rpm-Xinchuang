@@ -37,6 +37,26 @@ if [ "${BUILD_SOURCE_CACHE:-0}" != 1 ] || [ ! -s "$TOP/SOURCES/$ARCHIVE" ]; then
 fi
 sha256sum "$TOP/SOURCES/$ARCHIVE" | tee "$OUT/SOURCE-SHA256SUM"
 
+# These distro spec sources are required by %prep but were previously only
+# available in a developer's cached build tree. Fetch and pin them for CI.
+case "$PKG" in
+  chrony) source_number=10 ;;
+  ntp) source_number=5 ;;
+  *) source_number= ;;
+esac
+if [ -n "$source_number" ]; then
+  auxiliary_url="$(rpmspec -P --define "dist .$EL" "$SPEC" | sed -n "s/^Source${source_number}:[[:space:]]*//p")"
+  [[ "$auxiliary_url" == https://* ]] || { echo "invalid auxiliary source URL: $auxiliary_url" >&2; exit 1; }
+  auxiliary_file="${auxiliary_url##*/}"
+  expected_sha="$(awk -v name="$auxiliary_file" '$1 == name ":" {sub(/^sha256:/, "", $2); print $2}' "$SRC/certs/checksums.yaml")"
+  [ -n "$expected_sha" ] || { echo "missing pinned SHA256: $auxiliary_file" >&2; exit 1; }
+  if [ "${BUILD_SOURCE_CACHE:-0}" != 1 ] ||
+     ! echo "$expected_sha  $TOP/SOURCES/$auxiliary_file" | sha256sum -c --quiet >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 20 -o "$TOP/SOURCES/$auxiliary_file" "$auxiliary_url"
+  fi
+  echo "$expected_sha  $TOP/SOURCES/$auxiliary_file" | sha256sum -c -
+fi
+
 sed -Ei "s/^Version:[[:space:]]+.*/Version: $VER/" "$SPEC"
 if [ "$PKG" = vim ]; then
   base="${VER%.*}"

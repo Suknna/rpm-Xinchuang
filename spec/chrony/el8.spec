@@ -18,7 +18,7 @@ Source2:        chrony.helper
 Source3:        chrony-dnssrv@.service
 Source4:        chrony-dnssrv@.timer
 # simulator for test suite
-Source10:       https://gitlab.com/chrony/clknetsim/-/archive/master/clknetsim-%{clknetsim_ver}.tar.gz
+Source10:       https://gitlab.com/chrony/clknetsim/-/archive/5d1dc05806155924d7f0a004f7e0643b866c7807/clknetsim-%{clknetsim_ver}.tar.gz
 # script for converting ntp configuration to chrony
 Source11:       https://github.com/mlichvar/ntp2chrony/raw/%{ntp2chrony_ver}/ntp2chrony/ntp2chrony.py
 
@@ -83,7 +83,7 @@ touch -r examples/chrony.conf.example2 chrony.conf
 # regenerate the file from getdate.y
 rm -f getdate.c
 
-mv clknetsim-*-%{clknetsim_ver}* test/simulation/clknetsim
+mv clknetsim-*%{clknetsim_ver}* test/simulation/clknetsim
 
 install -m 644 -p %{SOURCE11} ntp2chrony.py
 
