@@ -31,13 +31,13 @@ query_pkg="$PKG"
 rpm -q --qf '%{VERSION}\n' "$query_pkg" | grep -Fx "$VER"
 case "$PKG" in
   bash) /bin/bash -c '[[ $(printf ok) == ok ]]' && /bin/bash --version | grep -F "$VER" ;;
-  sudo) bash "$SRC/scripts/verify-pam-rpms.sh" sudo "$DIST/sudo-$VER-"*."$EL".x86_64.rpm
+  sudo) if [ "$EL" = el7 ]; then yum -y -q install cpio shadow-utils util-linux
+        else dnf -y -q install cpio shadow-utils util-linux; fi
+        bash "$SRC/scripts/verify-pam-rpms.sh" sudo "$DIST/sudo-$VER-"*."$EL".x86_64.rpm
         sudo -V | grep -F "$VER"; test -f /etc/sudoers
         test -s /etc/pam.d/sudo && test -s /etc/pam.d/sudo-i
         sudo -n /usr/bin/true
         # Root's passwordless smoke test cannot exercise PAM authentication.
-        if [ "$EL" = el7 ]; then yum -y -q install shadow-utils util-linux
-        else dnf -y -q install shadow-utils util-linux; fi
         useradd -m -G wheel pam-ci
         password="PAM-ci-$(date +%s%N)"
         printf 'pam-ci:%s\n' "$password" | chpasswd
