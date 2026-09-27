@@ -7,6 +7,33 @@ VER="${3:?missing version}"
 SRC="${SRC_DIR:-/src}"
 DIST="$SRC/dist/$PKG/$EL"
 
+test_chrony_daemon() {
+  # No external NTP traffic and no access to the system clock (-x, port 0).
+  cat > /tmp/rpm-xinchuang-chrony.conf <<'CHRONY'
+driftfile /tmp/rpm-xinchuang-chrony.drift
+pidfile /tmp/rpm-xinchuang-chrony.pid
+port 0
+bindcmdaddress 127.0.0.1
+local stratum 8
+CHRONY
+  chronyd -x -d -f /tmp/rpm-xinchuang-chrony.conf > /tmp/rpm-xinchuang-chrony.log 2>&1 &
+  local pid=$! ready=0
+  for attempt in 1 2 3 4 5; do
+    if chronyc -h 127.0.0.1 tracking > /tmp/rpm-xinchuang-tracking 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null || :
+  wait "$pid" 2>/dev/null || :
+  if [ "$ready" != 1 ]; then
+    echo "chronyd did not answer chronyc tracking on loopback" >&2
+    return 1
+  fi
+  grep -F 'Stratum' /tmp/rpm-xinchuang-tracking
+}
+
 # shellcheck source=scripts/repos-common.sh
 source "$SRC/scripts/repos-common.sh"
 "configure_repos_$EL"
@@ -43,7 +70,8 @@ case "$PKG" in
         printf 'pam-ci:%s\n' "$password" | chpasswd
         test "$(printf '%s\n' "$password" | runuser -u pam-ci -- sudo -S -k /usr/bin/id -u)" = 0
         test "$(printf '%s\n' "$password" | runuser -u pam-ci -- sudo -S -k -i /usr/bin/id -u)" = 0 ;;
-  chrony) chronyd -v | grep -F "$VER"; test -f /usr/lib/systemd/system/chronyd.service ;;
+  chrony) chronyd -v | grep -F "$VER"; test -f /usr/lib/systemd/system/chronyd.service
+          test_chrony_daemon ;;
   vim) vim_banner="$(vim --version)"
        grep -F "Vi IMproved ${VER%.*}" <<< "$vim_banner"
        grep -F "${VER##*.}" <<< "$vim_banner"
@@ -52,7 +80,10 @@ case "$PKG" in
        vim -es -u NONE -c '%s/hello/works/' -c wq /tmp/vim-smoke.txt
        grep -Fx 'works' /tmp/vim-smoke.txt ;;
   ntp) ntpd --version 2>&1 | grep -F "$VER"; test -f /usr/lib/systemd/system/ntpd.service ;;
-  telnet) telnet --version | grep -F "$VER"; rpm -q telnet-server ;;
+  telnet) telnet --version | grep -F "$VER"; rpm -q telnet-server
+          test -f /usr/lib/systemd/system/telnet.socket
+          if [ "$EL" = el7 ]; then python "$SRC/scripts/test-telnet-negotiation.py"
+          else /usr/libexec/platform-python "$SRC/scripts/test-telnet-negotiation.py"; fi ;;
   *) exit 2 ;;
 esac
 echo "$PKG $VER on $EL installed and ran successfully"
