@@ -163,6 +163,30 @@ fresh)
 		fail "host key 未生成"
 	/usr/sbin/sshd -t && pass "sshd -t 配置检查通过" || fail "sshd -t 失败"
 
+	# A valid PAM file alone cannot prove password authentication. Exercise the
+	# installed server through the installed client with an isolated test user.
+	useradd -m ssh-pam-ci || fail "无法准备 SSH 密码认证账号"
+	SSH_TEST_PASSWORD="SSH-pam-ci-$(date +%s%N)"
+	printf 'ssh-pam-ci:%s\n' "$SSH_TEST_PASSWORD" | chpasswd || fail "无法设定测试账号密码"
+	cat > /tmp/rpm-xinchuang-askpass <<'ASKPASS'
+#!/bin/sh
+printf '%s\n' "$SSH_TEST_PASSWORD"
+ASKPASS
+	chmod 0700 /tmp/rpm-xinchuang-askpass
+	if [ "$(SSH_ASKPASS=/tmp/rpm-xinchuang-askpass SSH_ASKPASS_REQUIRE=force \
+		DISPLAY=:0 SSH_TEST_PASSWORD="$SSH_TEST_PASSWORD" \
+		ssh -n -F /dev/null -o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password \
+		-o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
+		-o ConnectTimeout=5 -o LogLevel=ERROR \
+		ssh-pam-ci@127.0.0.1 /usr/bin/id -un 2>/dev/null)" = ssh-pam-ci ]; then
+		pass "真实 SSH 密码登录与 PAM 认证成功"
+	else
+		fail "真实 SSH 密码登录与 PAM 认证失败"
+	fi
+	unset SSH_TEST_PASSWORD
+	rm -f /tmp/rpm-xinchuang-askpass
+
 	echo "=== 重启不改写已有密钥"
 	KEYS_BEFORE="$(keys_state)"
 	/etc/rc.d/init.d/sshd stop || fail "服务停止失败"
