@@ -1,5 +1,0 @@
-# Server-only credentials and runtime state must never enter the repository.
-config.yaml
-.env
-private/
-venv/
