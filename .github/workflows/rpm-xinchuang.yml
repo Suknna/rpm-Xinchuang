@@ -54,6 +54,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Dedicated forced-command key; values live only in repository Secrets.
+  PORTAL_SSH_HOST: ${{ secrets.PORTAL_SSH_HOST }}
+  PORTAL_SSH_KEY: ${{ secrets.PORTAL_SSH_KEY }}
+  PORTAL_SSH_KNOWN_HOSTS: ${{ secrets.PORTAL_SSH_KNOWN_HOSTS }}
   # 官方 UBI 基础镜像，固定 digest（升级 digest 属受控变更，与 local-*.sh 同步更新）
   UBI7_IMAGE: registry.access.redhat.com/ubi7/ubi@sha256:046e525722f14702c360dc6092324af7c21656e76b0c254b067871f1d4d3df68
   UBI8_IMAGE: registry.access.redhat.com/ubi8/ubi@sha256:ed721ca811f29fa0fd8a4666aec2fb6771f3defbecc708a973d0b711d6f09293
@@ -68,6 +72,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送版本检查开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 一次检测七个上游项目的稳定版
         id: detect
         env:
@@ -77,14 +84,14 @@ jobs:
           RETRY_COMPONENT: ${{ github.event.inputs.retry_component }}
         run: |
           if [ -n "$RETRY_COMPONENT" ]; then
-            [ "$FORCE_COMPONENTS" != true ] && [ "$REPAIR_PAM" != true ] && [ -z "$FORCE_VERSION" ] || {
+            if [ "$FORCE_COMPONENTS" = true ] || [ "$REPAIR_PAM" = true ] || [ -n "$FORCE_VERSION" ]; then
               echo 'retry_component 不可与 force/repair_pam/version 同时使用' >&2; exit 2;
-            }
+            fi
             python3 scripts/check_versions.py --retry-component "$RETRY_COMPONENT" --output "$GITHUB_OUTPUT"
           elif [ "$REPAIR_PAM" = true ]; then
-            [ "$FORCE_COMPONENTS" != true ] && [ -z "$FORCE_VERSION" ] || {
+            if [ "$FORCE_COMPONENTS" = true ] || [ -n "$FORCE_VERSION" ]; then
               echo 'repair_pam 不可与 force/version 同时使用' >&2; exit 2;
-            }
+            fi
             python3 scripts/check_versions.py --repair-pam --output "$GITHUB_OUTPUT"
           elif [ "$FORCE_COMPONENTS" = true ]; then
             python3 scripts/check_versions.py --force --output "$GITHUB_OUTPUT"
@@ -99,6 +106,13 @@ jobs:
             echo "强制指定版本: $FORCE_VERSION"
             echo "new_version=$FORCE_VERSION" >> "$GITHUB_OUTPUT"
           fi
+      - name: 推送版本检查结果与待构建版本
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
+          plan: ${{ toJSON(steps.detect.outputs) }}
 
   component-build:
     name: 构建 ${{ matrix.package }} (${{ matrix.el }})
@@ -108,8 +122,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     runs-on: ubuntu-latest
+    env:
+      PORTAL_MATRIX: ${{ toJSON(matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送组件构建开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 用仓库 spec 构建官方最新源码
         env:
           ENTRY: ${{ toJSON(matrix) }}
@@ -135,6 +154,12 @@ jobs:
           name: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
           if-no-files-found: error
+      - name: 推送组件构建结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   component-install:
     name: 安装验证 ${{ matrix.package }} (${{ matrix.el }})
@@ -144,8 +169,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     runs-on: ubuntu-latest
+    env:
+      PORTAL_MATRIX: ${{ toJSON(matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送组件测试开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: built-${{ matrix.package }}-${{ matrix.el }}
@@ -171,6 +201,12 @@ jobs:
           name: verified-${{ matrix.package }}-${{ matrix.el }}
           path: verified/
           if-no-files-found: error
+      - name: 推送组件测试结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   build-el7:
     needs: check
@@ -179,6 +215,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送 OpenSSH EL7 构建开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 对齐 spec 版本
         env:
           NEW_VERSION: ${{ needs.check.outputs.new_version }}
@@ -201,6 +240,12 @@ jobs:
             dist/el7/*.rpm
             dist/el7/SHA256SUMS
           if-no-files-found: error
+      - name: 推送 OpenSSH EL7 构建结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   build-el8:
     needs: check
@@ -209,6 +254,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送 OpenSSH EL8 构建开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 对齐 spec 版本
         env:
           NEW_VERSION: ${{ needs.check.outputs.new_version }}
@@ -231,6 +279,12 @@ jobs:
             dist/el8/*.rpm
             dist/el8/SHA256SUMS
           if-no-files-found: error
+      - name: 推送 OpenSSH EL8 构建结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   test-el7:
     needs: build-el7
@@ -238,6 +292,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送 OpenSSH EL7 测试开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 下载构建产物
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -252,6 +309,12 @@ jobs:
               "$UBI7_IMAGE" bash /src/scripts/test-install.sh el7 "$s" || fail=1
           done
           exit $fail
+      - name: 推送 OpenSSH EL7 测试结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   test-el8:
     needs: build-el8
@@ -259,6 +322,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送 OpenSSH EL8 测试开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 下载构建产物
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -273,6 +339,12 @@ jobs:
               "$UBI8_IMAGE" bash /src/scripts/test-install.sh el8 "$s" || fail=1
           done
           exit $fail
+      - name: 推送 OpenSSH EL8 测试结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   release:
     needs: [check, build-el7, build-el8, test-el7, test-el8]
@@ -287,6 +359,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送 OpenSSH 发布开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 下载构建产物（按平台分目录，避免平铺覆盖）
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -300,13 +375,15 @@ jobs:
       - name: 展示产物
         run: find dist -type f | sort
       - name: 幂等发布 Release（EL7/EL8 构建+测试全部通过才到达此步）
+        id: publish
         run: |
           set -uo pipefail
           REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' spec/openssh.spec | head -1)"
           [ -n "$REL" ] || { echo '无法读取 OpenSSH release' >&2; exit 1; }
           TAG="v${VER}-${REL}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # 期望资产：相对路径（el7/... el8/...）+ 两个改名后的 SUMS 文件
-          expected="$(cd dist && ls el7/*.rpm el8/*.rpm | sort)"
+          expected="$(cd dist && printf '%s\n' el7/*.rpm el8/*.rpm | sort)"
           cp dist/el7/SHA256SUMS /tmp/SHA256SUMS-el7
           cp dist/el8/SHA256SUMS /tmp/SHA256SUMS-el8
 
@@ -316,7 +393,6 @@ jobs:
             # 否则视为失败，不发布也不回写版本。
             echo "Release $TAG 已存在，校验资产完整性…"
             gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
-            fail=0
             { for a in $expected; do basename "$a"; done
               echo SHA256SUMS-el7; echo SHA256SUMS-el8; } | sort -u |
             while read -r a; do
@@ -340,40 +416,24 @@ jobs:
             exit 0
           fi
 
-          # 首次发布
-          {
-            echo "## OpenSSH ${VER}（EL7 / EL8, x86_64）"
-            echo
-            echo "基于官方 UBI7 / UBI8 容器（固定 digest）构建；静态链接 OpenSSL 与 zlib，"
-            echo "动态链接 glibc / PAM / Kerberos5；不含图形 askpass。"
-            echo "构建门禁：三包 EVR/arch 校验、ELF 无 libcrypto/libssl/libz 动态依赖、"
-            echo "sshd 动态链接 libpam、PAM 模板为 password-auth 且默认 UsePAM yes、"
-            echo "/etc 零 payload、5 项安装行为测试全部通过。"
-            echo
-            echo "### 安装 / 升级须知"
-            echo "- 本包安装与升级**不会**自动重启、停止或重载正在运行的 sshd；"
-            echo "  升级后请择机手动执行："
-            echo "  \`service sshd restart\`（EL7）或 \`systemctl daemon-reload && systemctl restart sshd\`（EL8）。"
-            echo "- 从发行版 openssh-server 升级时，**旧包自带的卸载脚本可能触发一次重启**；"
-            echo "  本包已保证保留的配置可通过新版本语法检查（安装日志可见），但不对该重启作保证。"
-            echo "- 严格配置保留：/etc 下的配置以 ghost 方式登记所有权、不随包分发内容；"
-            echo "  任何升级都不会改写/移动/删除既有配置，也不会产生 .rpmnew/.rpmsave。"
-            echo "- 默认配置模板位于 /usr/share/openssh/，仅当 /etc 中目标缺失时才会补齐。"
-            echo "- 已安装旧坏包生成的 pam_stack.so 配置不会被覆盖；须由管理员通过安全通道手动修复。"
-            echo "- 不会改写任何已有 host key；缺失密钥由 init 脚本在首次启动时补齐。"
-            echo
-            echo "### 产物校验"
-            echo '```'
-            cat /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8
-            echo '```'
-            echo "源码：openssh-${VER}.tar.gz（构建时已验证官方 GPG 签名）；"
-            echo "OpenSSL 固定为 spec 内声明版本，不经 CI 自动升级。"
-          } > /tmp/notes.md
+          # Summary failure writes a fallback note and never blocks publication.
+          python3 portal/ci.py summary --package openssh --version "$VER" --output /tmp/notes.md
           gh release create "$TAG" \
             dist/el7/*.rpm dist/el8/*.rpm \
             /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8 \
             --title "OpenSSH ${VER} RPM (EL7/EL8, x86_64)" \
             --notes-file /tmp/notes.md
+      - name: 推送已发布的 OpenSSH RPM 到下载站
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          mode: publish
+          tag: ${{ steps.publish.outputs.tag }}
+          files: |
+            dist/el7/*.rpm
+            dist/el8/*.rpm
+            /tmp/SHA256SUMS-el7
+            /tmp/SHA256SUMS-el8
       - name: 回写 OpenSSH spec 与统一版本文件
         run: |
           sed -i "s/^%global ver .*/%global ver ${VER}/" spec/openssh.spec
@@ -404,6 +464,12 @@ jobs:
             sleep 15
           done
           [ "$ok" = 1 ] || { echo "push 重试耗尽" >&2; exit 1; }
+      - name: 推送 OpenSSH 发布结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   component-release:
     name: 发布 ${{ matrix.package }} (${{ matrix.el }})
@@ -417,6 +483,7 @@ jobs:
     permissions:
       contents: write
     env:
+      PORTAL_MATRIX: ${{ toJSON(matrix) }}
       GH_TOKEN: ${{ github.token }}
       PKG: ${{ matrix.package }}
       EL: ${{ matrix.el }}
@@ -424,6 +491,9 @@ jobs:
       SOURCE_URL: ${{ matrix.url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送组件发布开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 必须已经通过独立 UBI 安装验证
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -434,12 +504,14 @@ jobs:
           name: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
       - name: 校验后创建 Release
+        id: publish
         run: |
           set -euo pipefail
           dir="dist/$PKG/$EL"
           selection="$(bash scripts/select-release-rpm.sh "$dir" "$PKG" "$VERSION" "$EL")"
-          IFS=$'\t' read -r rpmfile release <<< "$selection"
+          IFS=$'\t' read -r _rpmfile release <<< "$selection"
           tag="${PKG}-${EL}-${VERSION}-${release}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           (cd "$dir" && sha256sum -c SHA256SUMS)
           if gh release view "$tag" >/dev/null 2>&1; then
             tmp="$(mktemp -d)"
@@ -448,11 +520,21 @@ jobs:
               cmp "$file" "$tmp/$(basename "$file")"
             done
           else
+            python3 portal/ci.py summary --package "$PKG" --version "$VERSION" --output /tmp/notes.md
             gh release create "$tag" "$dir"/*.rpm "$dir/SHA256SUMS" \
               "$dir/SOURCE-SHA256SUM" "$dir/$PKG-$EL.spec" \
               --title "$PKG $VERSION RPM ($EL, x86_64)" \
-              --notes "官方上游源码：$SOURCE_URL；使用仓库 spec/$PKG/$EL.spec 在 UBI${EL#el} 构建，经过干净 UBI 安装与命令验证。"
+              --notes-file /tmp/notes.md
           fi
+      - name: 推送已发布的组件 RPM 到下载站
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          mode: publish
+          tag: ${{ steps.publish.outputs.tag }}
+          files: |
+            dist/${{ matrix.package }}/${{ matrix.el }}/*.rpm
+            dist/${{ matrix.package }}/${{ matrix.el }}/SHA256SUMS
       - name: 保存通过安装验证的版本和 spec
         run: |
           python3 - <<'PY'
@@ -472,6 +554,12 @@ jobs:
           name: published-${{ matrix.package }}-${{ matrix.el }}
           path: published/
           if-no-files-found: error
+      - name: 推送组件发布结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   component-record:
     name: 回写已发布版本与 spec
@@ -482,6 +570,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送版本回写开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: published-*
@@ -507,11 +598,18 @@ jobs:
             sleep 15
           done
           exit 1
+      - name: 推送版本回写结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}
 
   scheduled-time:
     name: 记录最近一次成功调度时间
     needs: [check, release, component-build, component-install, component-release, component-record]
     if: >-
+      always() &&
       github.event_name == 'schedule' &&
       needs.check.result == 'success' &&
       (needs.check.outputs.new_version == '' || needs.release.result == 'success') &&
@@ -528,6 +626,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 推送定时成功记录开始
+        continue-on-error: true
+        uses: ./.github/actions/portal
       - name: 更新根目录 time 并提交
         run: |
           set -euo pipefail
@@ -541,6 +642,13 @@ jobs:
           for i in 1 2 3 4 5; do
             git fetch origin "$BRANCH"
             if git rebase "origin/$BRANCH" && git push origin "HEAD:$BRANCH"; then exit 0; fi
+            echo "心跳回写重试 $i/5"
             sleep 15
           done
           exit 1
+      - name: 推送定时成功记录结果
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/portal
+        with:
+          status: ${{ job.status }}

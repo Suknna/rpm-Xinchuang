@@ -1,0 +1,42 @@
+name: RPM portal status and delivery
+
+on:
+  workflow_run:
+    workflows: [rpm-Xinchuang]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '可选：补推指定已发布 Release 的 RPM（留空仅回传最新运行状态）'
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  push:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PORTAL_SSH_HOST: ${{ secrets.PORTAL_SSH_HOST }}
+      PORTAL_SSH_KEY: ${{ secrets.PORTAL_SSH_KEY }}
+      PORTAL_SSH_KNOWN_HOSTS: ${{ secrets.PORTAL_SSH_KNOWN_HOSTS }}
+    steps:
+      # Always execute the default branch's client, never a triggering branch's code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: 整次运行结果兜底推送（包含取消、失败与跳过任务）
+        if: github.event_name == 'workflow_run'
+        run: python3 portal/ci.py complete
+      - name: 手动回传最新运行的真实状态
+        if: github.event_name == 'workflow_dispatch'
+        run: python3 portal/ci.py snapshot
+      - name: 补推已发布的 RPM
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python3 portal/ci.py relay --tag "$RELEASE_TAG"

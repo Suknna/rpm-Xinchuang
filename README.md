@@ -1,6 +1,6 @@
 # rpm-Xinchuang — EL7/EL8 RPM 自动构建与发布
 
-**定时检测、构建和发布都在 GitHub Actions 运行，不依赖本机。**唯一的
+**定时检测、构建和发布都在 GitHub Actions 运行，不依赖本机。**构建入口
 [rpm-Xinchuang 工作流](.github/workflows/rpm-xinchuang.yml) 在北京时间每天 09:17
 （UTC 01:17）运行一次。它通过 [Anitya](https://release-monitoring.org/) 固定项目 ID
 检查七个组件的最新稳定版，与根目录 [`version.json`](version.json) 按平台对比；
@@ -165,6 +165,17 @@ RPM：SSH 与 sudo 使用普通用户真实密码认证，chrony/telnet 检查�
   需要手动重新启用；
 - fork 仓库默认不运行 scheduled workflow。
 
+## 下载站与 CI 主动推送
+
+[`portal/`](portal/) 提供组件下载页、构建看板和每日调度健康视图。
+每个构建任务分支主动上报开始/成功/失败；版本检查还上报是否发现更新。
+发布成功后通过受限 SSH 推送 RPM，服务器定时轮询补偿丢失状态和文件。
+[`portal-status.yml`](.github/workflows/portal-status.yml) 在整次运行结束后补推
+实际任务结果（包括取消和跳过），也可手动补推已有 Release。
+Release 正文使用服务器生成的上游中文更新摘要，请求失败不阻塞发布。
+私密连接信息位于 Actions Secrets，模型配置只保存在服务器；安装和迁移步骤见
+[`portal/README.md`](portal/README.md)。
+
 ## 本地构建与测试
 
 依赖：docker（或兼容工具）+ 能访问 aliyun 镜像的网络。
@@ -194,7 +205,9 @@ spec/<组件>/<el>.spec     六组件各平台的仓库维护 spec
 source-assets/            从发行版 spec 保留的服务文件及配置模板（不含补丁）
 version.json              七组件按平台记录的已发布版本
 time                      最近一次完整成功调度的 UTC 时间
-.github/workflows/rpm-xinchuang.yml  唯一的 GitHub Actions 工作流
+.github/workflows/rpm-xinchuang.yml  版本检测、构建、测试和发布工作流
+.github/workflows/portal-status.yml  下载站最终状态回传与 Release 补推
+portal/                   下载页、主动推送接收器与定时同步补偿
 scripts/check_versions.py Anitya 七项目版本检测与构建矩阵生成
 scripts/build-upstream.sh UBI 内编译官方上游源码并打 RPM
 scripts/test-upstream-install.sh  全新 UBI 中安装及命令测试

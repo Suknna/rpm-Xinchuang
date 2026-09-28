@@ -1,0 +1,29 @@
+name: RPM portal push
+description: Best-effort lifecycle and verified release push over restricted SSH
+inputs:
+  mode:
+    description: event or publish
+    default: event
+  status:
+    description: in_progress, success, failure, cancelled or skipped
+    default: in_progress
+  plan:
+    description: Version detection outputs, used by the completed check event
+    default: '{}'
+  tag:
+    description: Published release tag
+    default: ''
+  files:
+    description: Newline-separated file globs for the published RPMs and checksums
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PORTAL_MODE: ${{ inputs.mode }}
+        PORTAL_STATUS: ${{ inputs.status }}
+        PORTAL_PLAN: ${{ inputs.plan }}
+        PORTAL_TAG: ${{ inputs.tag }}
+        PORTAL_FILES: ${{ inputs.files }}
+      run: python3 "$GITHUB_WORKSPACE/portal/ci.py" "$PORTAL_MODE"

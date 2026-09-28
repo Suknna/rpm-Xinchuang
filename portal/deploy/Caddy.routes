@@ -1,0 +1,22 @@
+# Imported inside the existing authenticated site block.
+# Only these two roots are public; /data/dist/private and app are never served.
+encode zstd gzip
+header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy same-origin
+    X-Frame-Options DENY
+    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+}
+@hidden path_regexp hidden (^|/)\.
+respond @hidden 404
+handle_path /download/* {
+    root * /data/download
+    header Content-Disposition attachment
+    file_server
+}
+handle {
+    root * /data/dist/public
+    @data path /data/*
+    header @data Cache-Control "no-store"
+    file_server
+}
