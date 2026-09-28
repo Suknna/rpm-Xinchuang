@@ -11,6 +11,18 @@ import check_versions  # noqa: E402
 
 
 class VersionDetectionTest(unittest.TestCase):
+    def test_retry_specific_component_and_version_without_touching_other_packages(self):
+        ssh, matrix = check_versions.retry_component_matrix("vim:9.2.1135")
+        self.assertEqual(ssh, "")
+        self.assertEqual(matrix, [
+            {"package": "vim", "el": el, "version": "9.2.1135",
+             "url": "https://github.com/vim/vim/archive/refs/tags/v9.2.1135.tar.gz"}
+            for el in ("el7", "el8")
+        ])
+        for invalid in ("vim", "vim:bad", "other:1.0", "openssh:10.5p1"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                check_versions.retry_component_matrix(invalid)
+
     def test_pam_repair_selects_only_ssh_and_el8_sudo_from_spec(self):
         with tempfile.TemporaryDirectory() as folder:
             spec = Path(folder) / "sudo.spec"

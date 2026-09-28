@@ -41,6 +41,10 @@ on:
         description: '只重建并验证 OpenSSH EL7/EL8 与 sudo EL8 的 PAM 修复'
         type: boolean
         default: false
+      retry_component:
+        description: '仅补发指定组件/版本的 EL7+EL8（例 vim:9.2.1135）'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -70,8 +74,14 @@ jobs:
           FORCE_VERSION: ${{ github.event.inputs.version }}
           FORCE_COMPONENTS: ${{ inputs.force }}
           REPAIR_PAM: ${{ inputs.repair_pam }}
+          RETRY_COMPONENT: ${{ github.event.inputs.retry_component }}
         run: |
-          if [ "$REPAIR_PAM" = true ]; then
+          if [ -n "$RETRY_COMPONENT" ]; then
+            [ "$FORCE_COMPONENTS" != true ] && [ "$REPAIR_PAM" != true ] && [ -z "$FORCE_VERSION" ] || {
+              echo 'retry_component 不可与 force/repair_pam/version 同时使用' >&2; exit 2;
+            }
+            python3 scripts/check_versions.py --retry-component "$RETRY_COMPONENT" --output "$GITHUB_OUTPUT"
+          elif [ "$REPAIR_PAM" = true ]; then
             [ "$FORCE_COMPONENTS" != true ] && [ -z "$FORCE_VERSION" ] || {
               echo 'repair_pam 不可与 force/version 同时使用' >&2; exit 2;
             }
@@ -427,12 +437,8 @@ jobs:
         run: |
           set -euo pipefail
           dir="dist/$PKG/$EL"
-          shopt -s nullglob
-          candidates=("$dir/$PKG-$VERSION-"*."$EL".x86_64.rpm)
-          [ "${#candidates[@]}" = 1 ] || { echo "需要且仅需一个主 RPM: ${candidates[*]}" >&2; exit 1; }
-          rpmfile="${candidates[0]}"
-          release="${rpmfile#"$dir/$PKG-$VERSION-"}"
-          release="${release%.x86_64.rpm}"
+          selection="$(bash scripts/select-release-rpm.sh "$dir" "$PKG" "$VERSION" "$EL")"
+          IFS=$'\t' read -r rpmfile release <<< "$selection"
           tag="${PKG}-${EL}-${VERSION}-${release}"
           (cd "$dir" && sha256sum -c SHA256SUMS)
           if gh release view "$tag" >/dev/null 2>&1; then

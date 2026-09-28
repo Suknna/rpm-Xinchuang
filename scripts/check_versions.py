@@ -80,19 +80,34 @@ def repair_pam_matrix(state, sudo_spec="spec/sudo/el8.spec"):
     }]
 
 
+def retry_component_matrix(selection):
+    """Retry exactly one pinned upstream component on both platforms."""
+    package, sep, version = selection.partition(":")
+    if not sep or package not in PROJECTS or package == "openssh":
+        raise ValueError("invalid retry component: " + selection)
+    pattern, template = PROJECTS[package][2:]
+    if not re.fullmatch(pattern, version):
+        raise ValueError("invalid retry version: " + selection)
+    return "", [{"package": package, "el": el, "version": version,
+                 "url": template.format(version=version)} for el in ("el7", "el8")]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version-file", default="version.json")
     parser.add_argument("--output", default=os.environ.get("GITHUB_OUTPUT", ""))
     parser.add_argument("--force", action="store_true", help="rebuild the current upstream release")
     parser.add_argument("--repair-pam", action="store_true", help="rebuild SSH and EL8 sudo PAM repairs only")
+    parser.add_argument("--retry-component", help="retry one component at a pinned version (e.g. vim:9.2.1135)")
     parser.add_argument("--sudo-spec", default="spec/sudo/el8.spec")
     args = parser.parse_args()
-    if args.repair_pam and args.force:
-        parser.error("--repair-pam and --force cannot be combined")
+    if sum((args.repair_pam, args.force, bool(args.retry_component))) > 1:
+        parser.error("--repair-pam, --force and --retry-component cannot be combined")
     with open(args.version_file, encoding="utf-8") as fh:
         state = json.load(fh)
-    if args.repair_pam:
+    if args.retry_component:
+        ssh, matrix = retry_component_matrix(args.retry_component)
+    elif args.repair_pam:
         ssh, matrix = repair_pam_matrix(state, args.sudo_spec)
     else:
         ssh, matrix = detect(state, force=args.force)
