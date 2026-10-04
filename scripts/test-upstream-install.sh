@@ -78,7 +78,17 @@ case "$PKG" in
        test -f /etc/vimrc
        printf 'hello\n' > /tmp/vim-smoke.txt
        vim -es -u NONE -c '%s/hello/works/' -c wq /tmp/vim-smoke.txt
-       grep -Fx 'works' /tmp/vim-smoke.txt ;;
+       grep -Fx 'works' /tmp/vim-smoke.txt
+       # Command-line Vim cannot catch GUI ABI/runtime regressions. Use only
+       # the target distribution's X server and libraries in this clean image.
+       if [ "$EL" = el7 ]; then yum -y -q install xorg-x11-server-Xvfb xorg-x11-xauth
+       else dnf -y -q install xorg-x11-server-Xvfb xorg-x11-xauth; fi
+       gvim --version
+       printf 'hello\n' > /tmp/gvim-smoke.txt
+       timeout 30s xvfb-run -a gvim -f -u NONE -U NONE -i NONE -n \
+         -c "if !has('gui_running') | cquit | endif" \
+         -c '%s/hello/gui-works/' -c wq /tmp/gvim-smoke.txt
+       grep -Fx 'gui-works' /tmp/gvim-smoke.txt ;;
   ntp) ntpd --version 2>&1 | grep -F "$VER"; test -f /usr/lib/systemd/system/ntpd.service ;;
   telnet) telnet --version | grep -F "$VER"; rpm -q telnet-server
           test -f /usr/lib/systemd/system/telnet.socket

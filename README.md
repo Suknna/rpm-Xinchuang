@@ -29,6 +29,8 @@
 - OpenSSH 静态链接 OpenSSL / zlib，动态链接系统 glibc / PAM / Kerberos5；保留既有配置和
   host key，本包的安装、升级脚本不主动重启 sshd。替换发行版包时，旧包卸载脚本仍可能触发重启。
 - Release 附带 RPM 和 SHA256 校验文件，方便下载后核验。
+- Vim EL7 保留系统 GTK2 依赖，通过源码兼容补丁修复新版本的图像缩放编译问题；
+  安装验证同时运行命令行 Vim 和 Xvfb 下的 gVim，不要求额外升级 GTK 或 glibc。
 
 生产部署仍需在目标系统上验证配置、依赖和业务行为；UBI 容器测试不等同于完整的 RHEL
 生产环境验收。EL7 构建使用 CentOS 7 归档源，部署时需结合目标系统的支持周期评估。

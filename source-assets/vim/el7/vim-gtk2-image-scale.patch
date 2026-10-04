@@ -1,0 +1,28 @@
+GTK2 has no gui.scale; keep its logical/physical pixel conversion at 1:1.
+Match the GTK3/GTK4-only scale member in gui.h without upgrading EL7's GTK.
+The regression was introduced by upstream patch 9.2.1161 (86cfe56b30b6).
+
+--- a/src/vim.h
++++ b/src/vim.h
+@@ -2719,7 +2719,8 @@
+-#if defined(FEAT_GUI_GTK) && defined(FEAT_IMAGE)
++#if defined(FEAT_GUI_GTK) && defined(FEAT_IMAGE) \
++	&& (defined(USE_GTK3) || defined(USE_GTK4))
+ // Logical pixels to physical pixels
+ # define LOG2PHY(l) (gui.in_use ? (double)(l) * gui.scale : (l))
+  // Physical pixels to logical pixels
+ # define PHY2LOG(p) (gui.in_use ? (double)(p) / gui.scale : (p))
+ #else
+ # define LOG2PHY(l) (l)
+--- a/src/gui.c
++++ b/src/gui.c
+@@ -682,7 +682,8 @@
+      * Create the GUI shell.
+      */
+     gui.in_use = true;		// Must be set after menus have been set up
+-#if defined(FEAT_GUI_GTK) && defined(FEAT_IMAGE)
++#if defined(FEAT_GUI_GTK) && defined(FEAT_IMAGE) \
++	&& (defined(USE_GTK3) || defined(USE_GTK4))
+     gui.scale = 1.0; // Default value
+ #endif
+     if (gui_mch_init() == FAIL)

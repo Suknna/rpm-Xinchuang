@@ -148,9 +148,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: built-${{ matrix.package }}-${{ matrix.el }}
+          # A failed matrix entry has no artifact; other platforms still proceed.
+          pattern: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
+          merge-multiple: true
       - name: 干净 UBI 中安装并运行
+        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
         env:
           PKG: ${{ matrix.package }}
           EL: ${{ matrix.el }}
@@ -160,6 +163,7 @@ jobs:
           docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
             bash /src/scripts/test-upstream-install.sh "$PKG" "$EL" "$VERSION"
       - name: 留下安装成功凭据
+        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
         env:
           PKG: ${{ matrix.package }}
           EL: ${{ matrix.el }}
@@ -167,6 +171,7 @@ jobs:
           mkdir -p verified
           printf '%s/%s\n' "$PKG" "$EL" > "verified/$PKG-$EL"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
         with:
           name: verified-${{ matrix.package }}-${{ matrix.el }}
           path: verified/
@@ -427,13 +432,16 @@ jobs:
       - name: 必须已经通过独立 UBI 安装验证
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-${{ matrix.package }}-${{ matrix.el }}
+          pattern: verified-${{ matrix.package }}-${{ matrix.el }}
           path: verified/
+          merge-multiple: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
         with:
           name: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
       - name: 校验后创建 Release
+        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
         run: |
           set -euo pipefail
           dir="dist/$PKG/$EL"
@@ -454,6 +462,7 @@ jobs:
               --notes "官方上游源码：$SOURCE_URL；使用仓库 spec/$PKG/$EL.spec 在 UBI${EL#el} 构建，经过干净 UBI 安装与命令验证。"
           fi
       - name: 保存通过安装验证的版本和 spec
+        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
         run: |
           python3 - <<'PY'
           import hashlib,json,os,pathlib,shutil
@@ -468,6 +477,7 @@ jobs:
                                          "spec_sha256":hashlib.sha256(built.read_bytes()).hexdigest()}))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
         with:
           name: published-${{ matrix.package }}-${{ matrix.el }}
           path: published/
@@ -488,6 +498,7 @@ jobs:
           path: published
           merge-multiple: true
       - name: 合并已通过安装验证的组件
+        if: hashFiles('published/receipts/*.json') != ''
         env:
           BRANCH: ${{ github.ref_name }}
         run: |

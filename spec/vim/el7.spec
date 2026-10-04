@@ -40,6 +40,7 @@ Source14: spec-template
 Source15: spec-template.new
 # rhbz#1083924 https://github.com/vim-jp/vim-cpp/blob/master/syntax/cpp.vim
 Source16: cpp.vim
+Patch0: vim-gtk2-image-scale.patch
 
 %if %{withhunspell}
 BuildRequires: hunspell-devel
@@ -176,6 +177,11 @@ vim-common package.
 
 %prep
 %setup -q -n vim-%{version}
+# Keep the native EL7 GTK2 ABI. Older versions lack this image-scaling guard;
+# skip the compatibility patch once upstream changes it, without a GTK upgrade.
+if grep -Fxq '#if defined(FEAT_GUI_GTK) && defined(FEAT_IMAGE)' src/vim.h; then
+%patch0 -p1
+fi
 # fix rogue dependencies from sample code
 chmod -x runtime/tools/mve.awk
 %if %{withhunspell}
