@@ -1,8 +1,8 @@
-# rpm-Xinchuang：同一次定时任务检测并构建七组件（EL7/EL8）
+# rpm-Xinchuang：同一次定时任务检测并构建已启用组件（EL7/EL8）
 #
 # 触发：
 #   * schedule：北京时间每天 09:17（UTC 01:17）检测 OpenSSH portable 更新，
-#     同时通过 Anitya 检测其他六个组件的官方最新上游版本；
+#     同时通过 Anitya 检测其他已启用组件的官方最新上游版本；
 #   * workflow_dispatch：受控手动运行（可强制指定版本 / 仅构建不发布）。
 #
 # 安全边界：
@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: '强制重建六个组件的当前最新稳定版'
+        description: '强制重建其他已启用组件的当前最新稳定版（Vim 暂停）'
         type: boolean
         default: false
       version:
@@ -42,7 +42,7 @@ on:
         type: boolean
         default: false
       retry_component:
-        description: '仅补发指定组件/版本的 EL7+EL8（例 vim:9.2.1135）'
+        description: '仅补发已启用组件/版本的 EL7+EL8（例 chrony:4.9）'
         required: false
         default: ''
 
@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 一次检测七个上游项目的稳定版
+      - name: 检测已启用上游项目的稳定版
         id: detect
         env:
           FORCE_VERSION: ${{ github.event.inputs.version }}

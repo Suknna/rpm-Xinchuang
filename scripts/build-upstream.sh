@@ -8,7 +8,8 @@ VER="${3:?missing version}"
 URL="${4:?missing source URL}"
 SRC="${SRC_DIR:-/src}"
 case "$PKG:$EL" in
-  bash:el7|bash:el8|chrony:el7|chrony:el8|vim:el7|vim:el8|sudo:el7|sudo:el8|ntp:el7|ntp:el8|telnet:el7|telnet:el8) ;;
+  vim:el7|vim:el8) echo "Vim builds are temporarily disabled" >&2; exit 2 ;;
+  bash:el7|bash:el8|chrony:el7|chrony:el8|sudo:el7|sudo:el8|ntp:el7|ntp:el8|telnet:el7|telnet:el8) ;;
   *) echo "unsupported package/platform: $PKG:$EL" >&2; exit 2 ;;
 esac
 [[ "$VER" =~ ^[0-9][A-Za-z0-9._+~-]*$ ]] || exit 2

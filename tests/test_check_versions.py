@@ -12,14 +12,14 @@ import check_versions  # noqa: E402
 
 class VersionDetectionTest(unittest.TestCase):
     def test_retry_specific_component_and_version_without_touching_other_packages(self):
-        ssh, matrix = check_versions.retry_component_matrix("vim:9.2.1135")
+        ssh, matrix = check_versions.retry_component_matrix("chrony:4.9")
         self.assertEqual(ssh, "")
         self.assertEqual(matrix, [
-            {"package": "vim", "el": el, "version": "9.2.1135",
-             "url": "https://github.com/vim/vim/archive/refs/tags/v9.2.1135.tar.gz"}
+            {"package": "chrony", "el": el, "version": "4.9",
+             "url": "https://chrony-project.org/releases/chrony-4.9.tar.gz"}
             for el in ("el7", "el8")
         ])
-        for invalid in ("vim", "vim:bad", "other:1.0", "openssh:10.5p1"):
+        for invalid in ("chrony", "chrony:bad", "other:1.0", "openssh:10.5p1", "vim:9.2.1202"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 check_versions.retry_component_matrix(invalid)
 
@@ -51,13 +51,17 @@ class VersionDetectionTest(unittest.TestCase):
         state["openssh"] = "10.5p1"
         state["ntp"]["el8"] = None
         def versions(name):
+            self.assertNotEqual(name, "vim", "paused Vim must not query upstream")
             return ["10.5p1", "10.4p1"] if name == "openssh" else ["2.0", "1.0"]
         ssh, matrix = check_versions.detect(state, versions)
         self.assertEqual(ssh, "")
-        self.assertEqual(len(matrix), 7)
-        self.assertEqual(sum(row["el"] == "el7" for row in matrix), 6)
+        self.assertEqual(len(matrix), 6)
+        self.assertEqual(sum(row["el"] == "el7" for row in matrix), 5)
         self.assertIn({"package": "ntp", "el": "el8", "version": "2.0",
                        "url": "https://downloads.nwtime.org/ntp/ntp-2.0.tar.gz"}, matrix)
+        _, forced = check_versions.detect(state, versions, force=True)
+        self.assertEqual({row["package"] for row in forced}, {"bash", "chrony", "ntp", "sudo", "telnet"})
+        self.assertEqual(len(forced), 10)
         self.assertFalse(check_versions.is_newer(["2.0", "1.0"], "2.0"))
         self.assertFalse(check_versions.is_newer(["10.5p1"], "10.6p1"))
 

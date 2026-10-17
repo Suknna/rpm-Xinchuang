@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | OpenSSH | [OpenSSH portable](https://www.openssh.com/portable.html) | 项目维护的专用 spec，复用上游 Red Hat 服务模板并适配 PAM |
 | chrony | [chrony](https://chrony-project.org/) | CentOS 7 / AlmaLinux 8 的 chrony spec |
-| Vim | [Vim](https://github.com/vim/vim) | CentOS 7 / AlmaLinux 8 的 vim spec |
+| Vim（构建已暂停） | [Vim](https://github.com/vim/vim) | CentOS 7 / AlmaLinux 8 的 vim spec |
 | Bash | [GNU Bash](https://www.gnu.org/software/bash/) | 项目维护的精简 spec，复用发行版默认配置 |
 | sudo | [sudo](https://www.sudo.ws/) | CentOS 7 / AlmaLinux 8 的 sudo spec |
 | NTP | [NTP Project](https://www.ntp.org/) | CentOS 7 的 ntp 打包规则，适配 EL7 / EL8 |
@@ -41,11 +41,14 @@
 发现更新后自动构建、测试并发布到 [Releases](https://github.com/Suknna/rpm-Xinchuang/releases)。
 已发布版本记录在 [`version.json`](version.json) 中，失败的平台不会推进版本基线。
 
+**Vim 构建与发布暂时停用**：自动检测、强制重建、手动补发和直接调用构建脚本均已屏蔽。
+保留 `spec/vim/` 与 `source-assets/vim/`，便于后续恢复。
+
 也可在 Actions 中选择 **rpm-Xinchuang → Run workflow** 手动运行：
 
 - `version`：指定 OpenSSH 版本。
-- `force`：强制重建其他六个组件。
-- `retry_component`：指定组件和版本，例如 `vim:9.2.1135`。
+- `force`：强制重建其他已启用组件。
+- `retry_component`：指定已启用组件和版本，例如 `chrony:4.9`。
 - `skip_release`：仅构建和验证，产物保留在 Actions artifacts 中。
 
 ## 开源许可

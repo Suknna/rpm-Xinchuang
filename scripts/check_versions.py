@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find newer upstream releases for all seven RPM components via Anitya."""
+"""Find newer upstream releases for enabled RPM components via Anitya."""
 
 import argparse
 import json
@@ -12,7 +12,8 @@ import urllib.request
 PROJECTS = {
     "openssh": ("OpenSSH", 2565, r"\d+\.\d+p\d+", None),
     "chrony": ("chrony", 8810, r"\d+(?:\.\d+)+", "https://chrony-project.org/releases/chrony-{version}.tar.gz"),
-    "vim": ("vim", 5092, r"\d+(?:\.\d+)+", "https://github.com/vim/vim/archive/refs/tags/v{version}.tar.gz"),
+    # Temporarily paused: exclude Vim from scheduled, forced and retry builds.
+    # "vim": ("vim", 5092, r"\d+(?:\.\d+)+", "https://github.com/vim/vim/archive/refs/tags/v{version}.tar.gz"),
     "bash": ("bash", 166, r"\d+(?:\.\d+)+", "https://ftp.gnu.org/gnu/bash/bash-{version}.tar.gz"),
     "sudo": ("sudo", 4906, r"\d+(?:\.\d+)+p\d+", "https://www.sudo.ws/dist/sudo-{version}.tar.gz"),
     "ntp": ("ntp", 9025, r"\d+(?:\.\d+)+p\d+", "https://downloads.nwtime.org/ntp/ntp-{version}.tar.gz"),
@@ -98,7 +99,7 @@ def main():
     parser.add_argument("--output", default=os.environ.get("GITHUB_OUTPUT", ""))
     parser.add_argument("--force", action="store_true", help="rebuild the current upstream release")
     parser.add_argument("--repair-pam", action="store_true", help="rebuild SSH and EL8 sudo PAM repairs only")
-    parser.add_argument("--retry-component", help="retry one component at a pinned version (e.g. vim:9.2.1135)")
+    parser.add_argument("--retry-component", help="retry one component at a pinned version (e.g. chrony:4.9)")
     parser.add_argument("--sudo-spec", default="spec/sudo/el8.spec")
     args = parser.parse_args()
     if sum((args.repair_pam, args.force, bool(args.retry_component))) > 1:
