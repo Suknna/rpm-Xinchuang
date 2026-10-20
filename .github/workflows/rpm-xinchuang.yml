@@ -16,6 +16,7 @@
 #   * Release 按 tag 存在性 + 全部资产哈希校验后决定是否重入（不完整即失败，
 #     绝不在资产不完整时回写版本）；
 #   * 版本成功发布才回写；所有分支成功后写根目录 time（无更新也会提交）。
+#   * 同组件/平台只保留 RPM 版本号最高的 Release；清理成功后才回写保留版本。
 name: rpm-Xinchuang
 
 on:
@@ -305,11 +306,13 @@ jobs:
       - name: 展示产物
         run: find dist -type f | sort
       - name: 幂等发布 Release（EL7/EL8 构建+测试全部通过才到达此步）
+        id: publish
         run: |
           set -uo pipefail
           REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' spec/openssh.spec | head -1)"
           [ -n "$REL" ] || { echo '无法读取 OpenSSH release' >&2; exit 1; }
           TAG="v${VER}-${REL}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           # 期望资产：相对路径（el7/... el8/...）+ 两个改名后的 SUMS 文件
           expected="$(cd dist && ls el7/*.rpm el8/*.rpm | sort)"
           cp dist/el7/SHA256SUMS /tmp/SHA256SUMS-el7
@@ -379,7 +382,19 @@ jobs:
             /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8 \
             --title "OpenSSH ${VER} RPM (EL7/EL8, x86_64)" \
             --notes-file /tmp/notes.md
+      - name: 安装 RPM 版本比较库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-rpm
+      - name: 仅保留最高版本的 OpenSSH Release
+        id: retention
+        env:
+          PUBLISHED_TAG: ${{ steps.publish.outputs.tag }}
+        run: |
+          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" \
+            --tag "$PUBLISHED_TAG" --output "$GITHUB_OUTPUT"
       - name: 回写 OpenSSH spec 与统一版本文件
+        if: steps.retention.outputs.retained == 'true'
         run: |
           sed -i "s/^%global ver .*/%global ver ${VER}/" spec/openssh.spec
           python3 - <<'PY'
@@ -441,6 +456,7 @@ jobs:
           name: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
       - name: 校验后创建 Release
+        id: publish
         if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
         run: |
           set -euo pipefail
@@ -448,6 +464,7 @@ jobs:
           selection="$(bash scripts/select-release-rpm.sh "$dir" "$PKG" "$VERSION" "$EL")"
           IFS=$'\t' read -r rpmfile release <<< "$selection"
           tag="${PKG}-${EL}-${VERSION}-${release}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           (cd "$dir" && sha256sum -c SHA256SUMS)
           if gh release view "$tag" >/dev/null 2>&1; then
             tmp="$(mktemp -d)"
@@ -461,8 +478,21 @@ jobs:
               --title "$PKG $VERSION RPM ($EL, x86_64)" \
               --notes "官方上游源码：$SOURCE_URL；使用仓库 spec/$PKG/$EL.spec 在 UBI${EL#el} 构建，经过干净 UBI 安装与命令验证。"
           fi
+      - name: 安装 RPM 版本比较库
+        if: steps.publish.outputs.tag != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-rpm
+      - name: 仅保留同组件同系统的最高版本 Release
+        id: retention
+        if: steps.publish.outputs.tag != ''
+        env:
+          PUBLISHED_TAG: ${{ steps.publish.outputs.tag }}
+        run: |
+          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" \
+            --tag "$PUBLISHED_TAG" --output "$GITHUB_OUTPUT"
       - name: 保存通过安装验证的版本和 spec
-        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
+        if: steps.retention.outputs.retained == 'true'
         run: |
           python3 - <<'PY'
           import hashlib,json,os,pathlib,shutil
@@ -477,7 +507,7 @@ jobs:
                                          "spec_sha256":hashlib.sha256(built.read_bytes()).hexdigest()}))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
+        if: steps.retention.outputs.retained == 'true'
         with:
           name: published-${{ matrix.package }}-${{ matrix.el }}
           path: published/

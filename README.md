@@ -41,6 +41,12 @@
 发现更新后自动构建、测试并发布到 [Releases](https://github.com/Suknna/rpm-Xinchuang/releases)。
 已发布版本记录在 [`version.json`](version.json) 中，失败的平台不会推进版本基线。
 
+每次成功发布后，Releases 对**同一组件、同一系统（EL7 / EL8）只保留版本号最高的一套 RPM**，
+配套子包一并保留；先比较软件版本，再按 RPM 规则比较修订号。OpenSSH 的 EL7 / EL8
+共用一个 Release，两平台均通过构建与验证后一起更新。确认保留版本的 RPM 与校验清单完整一致后，
+自动删除该组的其他 Release 及附件，保留 Git tag。手动补发较低版本不会替换高版本，也不会回退版本记录；
+`skip_release` 不触发清理。
+
 **Vim 构建与发布暂时停用**：自动检测、强制重建、手动补发和直接调用构建脚本均已屏蔽。
 保留 `spec/vim/` 与 `source-assets/vim/`，便于后续恢复。
 
