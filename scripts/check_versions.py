@@ -10,7 +10,7 @@ import urllib.request
 
 # Pin project IDs: Anitya has unrelated projects named sudo and ntp.
 PROJECTS = {
-    "openssh": ("OpenSSH", 2565, r"\d+\.\d+p\d+", None),
+    "openssh": ("OpenSSH", 2565, r"\d+\.\d+p\d+", "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-{version}.tar.gz"),
     "chrony": ("chrony", 8810, r"\d+(?:\.\d+)+", "https://chrony-project.org/releases/chrony-{version}.tar.gz"),
     # Temporarily paused: exclude Vim from scheduled, forced and retry builds.
     # "vim": ("vim", 5092, r"\d+(?:\.\d+)+", "https://github.com/vim/vim/archive/refs/tags/v{version}.tar.gz"),
@@ -20,6 +20,18 @@ PROJECTS = {
     "telnet": ("inetutils", 13805, r"\d+(?:\.\d+)+", "https://ftp.gnu.org/gnu/inetutils/inetutils-{version}.tar.gz"),
 }
 API = "https://release-monitoring.org/api/v2/projects/?name="
+PLATFORMS = ("el7", "el8", "centos7")
+SSH_PLATFORMS = ("centos7", "ubuntu2204")
+
+
+def platform_openssh(version, platform):
+    return {"package": "openssh", "el": platform, "version": version,
+            "url": PROJECTS["openssh"][3].format(version=version)}
+
+
+def centos_openssh(version):
+    return {"package": "openssh", "el": "centos7", "version": version,
+            "url": PROJECTS["openssh"][3].format(version=version)}
 
 
 def latest(package, fetch=None):
@@ -45,12 +57,15 @@ def detect(state, get_versions=latest, force=False):
     matrix = []
     openssh = get_versions("openssh")
     ssh_update = openssh[0] if is_newer(openssh, state["openssh"]) else ""
+    for platform in SSH_PLATFORMS:
+        if is_newer(openssh, state.get("openssh_" + platform)):
+            matrix.append(platform_openssh(openssh[0], platform))
     for package, (_, _, _, template) in PROJECTS.items():
         if package == "openssh":
             continue
         versions = get_versions(package)
         version = versions[0]
-        for el in ("el7", "el8"):
+        for el in PLATFORMS:
             if force or is_newer(versions, state[package].get(el)):
                 matrix.append({"package": package, "el": el, "version": version,
                                "url": template.format(version=version)})
@@ -75,14 +90,14 @@ def repair_pam_matrix(state, sudo_spec="spec/sudo/el8.spec"):
     if match is None or not re.fullmatch(PROJECTS["sudo"][2], match.group(1)):
         raise ValueError("invalid sudo version in " + str(sudo_spec))
     version = match.group(1)
-    return state["openssh"], [{
+    return state["openssh"], [centos_openssh(state["openssh"]), {
         "package": "sudo", "el": "el8", "version": version,
         "url": PROJECTS["sudo"][3].format(version=version),
     }]
 
 
 def retry_component_matrix(selection):
-    """Retry exactly one pinned upstream component on both platforms."""
+    """Retry exactly one pinned upstream component on all platforms."""
     package, sep, version = selection.partition(":")
     if not sep or package not in PROJECTS or package == "openssh":
         raise ValueError("invalid retry component: " + selection)
@@ -90,7 +105,7 @@ def retry_component_matrix(selection):
     if not re.fullmatch(pattern, version):
         raise ValueError("invalid retry version: " + selection)
     return "", [{"package": package, "el": el, "version": version,
-                 "url": template.format(version=version)} for el in ("el7", "el8")]
+                 "url": template.format(version=version)} for el in PLATFORMS]
 
 
 def main():
@@ -101,9 +116,16 @@ def main():
     parser.add_argument("--repair-pam", action="store_true", help="rebuild SSH and EL8 sudo PAM repairs only")
     parser.add_argument("--retry-component", help="retry one component at a pinned version (e.g. chrony:4.9)")
     parser.add_argument("--sudo-spec", default="spec/sudo/el8.spec")
+    parser.add_argument("--openssh-version", default=os.environ.get("FORCE_VERSION", ""),
+                        help="build a pinned OpenSSH version on all platforms")
     args = parser.parse_args()
     if sum((args.repair_pam, args.force, bool(args.retry_component))) > 1:
         parser.error("--repair-pam, --force and --retry-component cannot be combined")
+    if args.openssh_version:
+        if args.repair_pam or args.retry_component:
+            parser.error("--openssh-version cannot be combined with --repair-pam or --retry-component")
+        if not re.fullmatch(PROJECTS["openssh"][2], args.openssh_version):
+            parser.error("invalid OpenSSH version: " + args.openssh_version)
     with open(args.version_file, encoding="utf-8") as fh:
         state = json.load(fh)
     if args.retry_component:
@@ -112,8 +134,12 @@ def main():
         ssh, matrix = repair_pam_matrix(state, args.sudo_spec)
     else:
         ssh, matrix = detect(state, force=args.force)
+    if args.openssh_version:
+        ssh = args.openssh_version
+        matrix = [row for row in matrix if row["package"] != "openssh"]
+        matrix.extend(platform_openssh(ssh, platform) for platform in SSH_PLATFORMS)
     print("OpenSSH update:", ssh or "none")
-    print("Other updates:", ", ".join(p["package"] + "/" + p["el"] for p in matrix) or "none")
+    print("Matrix updates:", ", ".join(p["package"] + "/" + p["el"] for p in matrix) or "none")
     if args.output:
         with open(args.output, "a", encoding="utf-8") as fh:
             fh.write("new_version=" + ssh + "\n")

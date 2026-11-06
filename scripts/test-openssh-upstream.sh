@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run OpenSSH's own regress suite on the binaries built by rpmbuild.
-# Invoked only inside an ephemeral UBI build container, never on the host.
+# Invoked only inside an ephemeral UBI / CentOS build container, never on the host.
 set -euo pipefail
 
 el="${1:?usage: test-openssh-upstream.sh <el7|el8> <build-tree>}"

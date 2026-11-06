@@ -12,6 +12,10 @@
   软件上游为 GNU inetutils，不再使用发行版原有的 netkit-telnet 源码。
 - OpenSSH 使用项目维护的专用 spec，复用 OpenSSH portable 随附的 Red Hat 服务模板，
   并维护适用于 EL7 / EL8 的 PAM 配置。
+- Ubuntu 22.04 的 OpenSSH 使用项目维护的 debhelper 规则；PAM、SSH 默认配置和
+  `ssh.service` 按 Ubuntu jammy 的 OpenSSH 包约定适配。软件包内附上游 `LICENCE`，
+  以及 [Debian 打包文件的 BSD-2-clause 声明](packaging/openssh/ubuntu2204/packaging-copyright)。
+  Ubuntu/Debian 打包约定来源为 Ubuntu `openssh` 源包（https://launchpad.net/ubuntu/+source/openssh）。
 
 ## 软件与依赖
 

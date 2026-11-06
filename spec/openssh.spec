@@ -1,5 +1,5 @@
 # ============================================================================
-# OpenSSH portable RPM spec — built on official UBI7 / UBI8 (x86_64 only)
+# OpenSSH portable RPM spec — built on official UBI7 / UBI8 / CentOS 7 (x86_64 only)
 #
 # 维护约定（与 CI 工作流保持一致）：
 #   * OpenSSH 版本由 CI 自动升级：仅修改 spec 顶部 ver 宏定义，Source0 由宏生成。

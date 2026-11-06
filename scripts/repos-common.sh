@@ -2,8 +2,8 @@
 # yum/dnf 仓库配置（build 与 test 脚本共用，source 本文件）。
 #
 # 原则：
-#   * 基础镜像必须是官方 UBI（registry.access.redhat.com/ubi7|ubi8，CI 固定 digest）；
-#   * 仅补充免费镜像源解决 UBI 缺包问题（UBI7 主源已 404；UBI8 缺 pam-devel）；
+#   * 基础镜像为官方 UBI7 / UBI8 / CentOS 7，digest 固定在 platforms.sh；
+#   * EL7 使用归档源，EL8 补充免费镜像源解决 UBI 缺包问题；
 #   * 所有源一律 gpgcheck=1（不禁用签名校验）；
 #   * GPG 公钥固定在本仓库 certs/ 下（指纹已对照官方页面逐一核验，
 #     见各 key 上方注释），不随源同渠道动态下载，杜绝“源与 key 一起被替换”。
@@ -31,10 +31,14 @@ install_pinned_keys() {
 	install -m 644 "$CERTS/almalinux8-key.asc"      "$KEYRING/AlmaLinux-8"
 }
 
-# EL7：UBI7 自带 repo 主源 404（EOL），禁用之，改用 vault（base/updates/extras/SCLo）
+# EL7：UBI7 主源与 CentOS 7 mirrorlist 已失效，禁用后统一改用 vault。
 configure_repos_el7() {
 	install_pinned_keys
-	sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/ubi.repo
+	local repo
+	for repo in /etc/yum.repos.d/ubi.repo /etc/yum.repos.d/CentOS-*.repo; do
+		[ -f "$repo" ] || continue
+		mv "$repo" "$repo.disabled"
+	done
 	cat > /etc/yum.repos.d/rpm-xinchuang-el7.repo <<REPOEOF
 [rc-el7-base]
 name=rpm-xinchuang el7 base (CentOS 7.9.2009 vault)

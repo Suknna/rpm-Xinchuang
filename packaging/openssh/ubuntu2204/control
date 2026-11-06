@@ -1,0 +1,30 @@
+Source: openssh
+Section: net
+Priority: optional
+Maintainer: rpm-Xinchuang maintainers <noreply@github.com>
+Build-Depends: debhelper-compat (= 13), libssl-dev, zlib1g-dev, libpam0g-dev, libkrb5-dev, libedit-dev, pkg-config
+Standards-Version: 4.6.0
+Homepage: https://www.openssh.com/portable.html
+Rules-Requires-Root: no
+
+Package: openssh-client
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Suggests: keychain, ssh-askpass
+Provides: ssh-client
+Description: OpenSSH portable clients for Ubuntu 22.04
+ Upstream SSH, SCP and SFTP clients built for Ubuntu 22.04.
+
+Package: openssh-server
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, openssh-client (= ${binary:Version}), openssh-sftp-server (= ${binary:Version}), adduser, libpam-runtime, libpam-modules
+Provides: ssh-server
+Description: OpenSSH portable server for Ubuntu 22.04
+ Preserves existing configuration and host keys. Installation and upgrade do
+ not start or restart SSH; administrators activate the new daemon explicitly.
+
+Package: openssh-sftp-server
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, openssh-client (= ${binary:Version})
+Description: OpenSSH SFTP subsystem for Ubuntu 22.04
+ SFTP subsystem at the Ubuntu-compatible /usr/lib/openssh/sftp-server path.

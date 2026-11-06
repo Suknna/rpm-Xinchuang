@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the highest RPM version/release after a successful GitHub publication."""
+"""Keep the highest native package version after a successful GitHub publication."""
 
 import argparse
 from dataclasses import dataclass
@@ -24,16 +24,19 @@ class ReleaseKey:
 
 
 def parse_tag(tag):
-    # OpenSSH has always published both platforms together; its first tag had
+    match = re.fullmatch(r"openssh-ubuntu2204-(\d+\.\d+p\d+)-(\d+ubuntu22\.04)", tag)
+    if match:
+        return ReleaseKey("openssh", "ubuntu2204", match[1], match[2])
+    # Legacy UBI OpenSSH publishes both platforms together; its first tag had
     # no RPM release suffix and represented release 1.
     match = re.fullmatch(r"v(\d+\.\d+p\d+)(?:-(\d+))?", tag)
     if match:
         return ReleaseKey("openssh", "all", match[1], match[2] or "1")
-    match = re.fullmatch(r"([a-z]+)-(el[78])-([^-]+)-(\d+[A-Za-z0-9._+~^]*)", tag)
+    match = re.fullmatch(r"([a-z]+)-(el[78]|centos7)-([^-]+)-(\d+[A-Za-z0-9._+~^]*)", tag)
     if not match:
         return None
     package, el, version, release = match.groups()
-    if package not in PROJECTS or package == "openssh":
+    if package not in PROJECTS or (package == "openssh" and el != "centos7"):
         return None
     # Historical distro sudo releases (e.g. 1.8.23) predate the pN suffix.
     pattern = r"\d+(?:\.\d+)+(?:p\d+)?" if package == "sudo" else PROJECTS[package][2]
@@ -49,11 +52,13 @@ def github(*args, text=True):
 
 def verify_release(repo, release, key):
     """Require a complete, uploaded RPM set before removing any fallback."""
+    if key.el == "ubuntu2204":
+        return verify_deb_release(repo, release, key)
     tag = release["tag_name"]
     assets = {asset["name"]: asset for asset in release["assets"]}
     if len(assets) != len(release["assets"]):
         raise ValueError("duplicate release assets: " + tag)
-    platforms = ("el7", "el8") if key.package == "openssh" else (key.el,)
+    platforms = ("el7", "el8") if key.el == "all" else (key.el,)
     all_rpms = {name for name in assets if name.endswith(".rpm")}
     covered = set()
     for el in platforms:
@@ -67,7 +72,7 @@ def verify_release(repo, release, key):
                 raise ValueError("missing or duplicate primary RPM: " + tag + "/" + package + "/" + el)
         if any(name.rsplit("-", 2)[1] != key.version for name in rpms):
             raise ValueError("mixed RPM versions: " + tag)
-        manifest = "SHA256SUMS-" + el if key.package == "openssh" else "SHA256SUMS"
+        manifest = "SHA256SUMS-" + el if key.el == "all" else "SHA256SUMS"
         for name in rpms | {manifest}:
             asset = assets.get(name, {})
             if asset.get("state") != "uploaded" or asset.get("size", 0) <= 0:
@@ -94,6 +99,46 @@ def verify_release(repo, release, key):
         raise ValueError("unexpected platform in RPM assets: " + tag)
 
 
+def verify_deb_release(repo, release, key):
+    """Require all three exact DEBs and their hashes before deleting a fallback."""
+    tag = release["tag_name"]
+    assets = {asset["name"]: asset for asset in release["assets"]}
+    packages = ("openssh-client", "openssh-server", "openssh-sftp-server")
+    expected = {f"{package}_{key.version}-{key.release}_amd64.deb" for package in packages}
+    if len(assets) != len(release["assets"]) or {n for n in assets if n.endswith(".deb")} != expected:
+        raise ValueError("missing or unexpected DEB assets: " + tag)
+    for name in expected | {"SHA256SUMS", "build.json", "SOURCE-SHA256SUM", "changelog"}:
+        asset = assets.get(name, {})
+        if asset.get("state") != "uploaded" or asset.get("size", 0) <= 0:
+            raise ValueError("missing or incomplete asset: " + tag + "/" + name)
+    contents = github("release", "download", tag, "--repo", repo, "--pattern", "SHA256SUMS", "--output", "-")
+    checksums = {}
+    for line in contents.splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](?:\./)?([^/]+\.deb)", line)
+        if not match or match[2] in checksums:
+            raise ValueError("invalid checksum manifest: " + tag)
+        checksums[match[2]] = match[1].lower()
+    if set(checksums) != expected:
+        raise ValueError("DEB assets do not match checksum manifest: " + tag)
+    for name, checksum in checksums.items():
+        digest = assets[name].get("digest")
+        if not digest:
+            data = github("release", "download", tag, "--repo", repo, "--pattern", name, "--output", "-", text=False)
+            digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        if digest != "sha256:" + checksum:
+            raise ValueError("DEB checksum mismatch: " + tag + "/" + name)
+
+
+def newer_release(key, previous):
+    if key.el == "ubuntu2204":
+        result = subprocess.run(["dpkg", "--compare-versions", f"1:{key.version}-{key.release}",
+                                 "gt", f"1:{previous.version}-{previous.release}"], check=False)
+        if result.returncode not in (0, 1):
+            raise ValueError("dpkg version comparison failed")
+        return result.returncode == 0
+    return rpm.labelCompare(("0", key.version, key.release), ("0", previous.version, previous.release)) > 0
+
+
 def prune(repo, tag, dry_run=False):
     current_key = parse_tag(tag)
     if current_key is None:
@@ -114,8 +159,8 @@ def prune(repo, tag, dry_run=False):
         raise ValueError("successful published release not found: " + tag)
     keeper, keeper_key = current, current_key
     for release, key in candidates:
-        # Use RPM's own ordering for numeric releases and distro suffixes.
-        if rpm.labelCompare(("0", key.version, key.release), ("0", keeper_key.version, keeper_key.release)) > 0:
+        # Use the target package manager's ordering, not lexical tag order.
+        if newer_release(key, keeper_key):
             keeper, keeper_key = release, key
     verify_release(repo, current, current_key)
     if keeper["id"] != current["id"]:

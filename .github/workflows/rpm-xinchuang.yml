@@ -1,4 +1,4 @@
-# rpm-Xinchuang：同一次定时任务检测并构建已启用组件（EL7/EL8）
+# rpm-Xinchuang：EL7/EL8/CentOS 7 RPM，以及 Ubuntu 22.04 OpenSSH DEB
 #
 # 触发：
 #   * schedule：北京时间每天 09:17（UTC 01:17）检测 OpenSSH portable 更新，
@@ -9,7 +9,7 @@
 #   * 无 pull_request 触发——外部 PR 永远不会拿到本仓库的任何 token；
 #   * 默认仅 contents:read，仅发布、版本回写和 time 记录 job 需要 contents:write；
 #   * GITHUB_TOKEN 仅对本仓库有效；
-#   * 所有第三方 action 固定到 commit SHA；UBI 基础镜像固定 digest。
+#   * 所有第三方 action 固定到 commit SHA；基础镜像在 scripts/platforms.sh 固定 digest。
 #
 # 幂等与并发：
 #   * concurrency 排队执行（不取消进行中的运行）；
@@ -39,11 +39,11 @@ on:
         type: boolean
         default: false
       repair_pam:
-        description: '只重建并验证 OpenSSH EL7/EL8 与 sudo EL8 的 PAM 修复'
+        description: '只重建并验证 OpenSSH RPM 平台与 sudo EL8 的 PAM 修复'
         type: boolean
         default: false
       retry_component:
-        description: '仅补发已启用组件/版本的 EL7+EL8（例 chrony:4.9）'
+        description: '仅补发已启用组件/版本的 EL7+EL8+CentOS 7（例 chrony:4.9）'
         required: false
         default: ''
 
@@ -53,11 +53,6 @@ permissions:
 concurrency:
   group: rpm-xinchuang
   cancel-in-progress: false
-
-env:
-  # 官方 UBI 基础镜像，固定 digest（升级 digest 属受控变更，与 local-*.sh 同步更新）
-  UBI7_IMAGE: registry.access.redhat.com/ubi7/ubi@sha256:046e525722f14702c360dc6092324af7c21656e76b0c254b067871f1d4d3df68
-  UBI8_IMAGE: registry.access.redhat.com/ubi8/ubi@sha256:ed721ca811f29fa0fd8a4666aec2fb6771f3defbecc708a973d0b711d6f09293
 
 jobs:
   check:
@@ -92,14 +87,6 @@ jobs:
           else
             python3 scripts/check_versions.py --output "$GITHUB_OUTPUT"
           fi
-          if [ -n "$FORCE_VERSION" ]; then
-            echo "$FORCE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+p[0-9]+$' || {
-              echo "非法版本格式: $FORCE_VERSION（应为 X.YpZ）" >&2
-              exit 1
-            }
-            echo "强制指定版本: $FORCE_VERSION"
-            echo "new_version=$FORCE_VERSION" >> "$GITHUB_OUTPUT"
-          fi
 
   component-build:
     name: 构建 ${{ matrix.package }} (${{ matrix.el }})
@@ -111,26 +98,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 用仓库 spec 构建官方最新源码
+      - name: 用仓库打包规则构建官方最新源码
         env:
           ENTRY: ${{ toJSON(matrix) }}
         run: |
           readarray -t args < <(python3 -c 'import json,os; p=json.loads(os.environ["ENTRY"]); print("\n".join(p[k] for k in ("package","el","version","url")))')
-          # 候选版本先写入本次工作区；发布及安装验证都成功才回写默认分支。
-          python3 - <<'PY'
-          import json,os,pathlib
-          row=json.loads(os.environ['ENTRY'])
-          path=pathlib.Path('version.json')
-          versions=json.loads(path.read_text())
-          versions[row['package']][row['el']]=row['version']
-          path.write_text(json.dumps(versions,indent=2,sort_keys=True)+'\n')
-          PY
-          if [ "${args[0]}:${args[1]}" = ntp:el7 ]; then
-            bash scripts/fetch-ntp-openssl.sh "$PWD"
+          source scripts/platforms.sh
+          image="$(image_for "${args[1]}")"
+          if [ "${args[1]}" = ubuntu2204 ]; then
+            docker run --rm --platform linux/amd64 -v "$PWD":/src -e SRC_DIR=/src "$image" \
+              bash /src/scripts/build-openssh-deb.sh "${args[2]}"
+          elif [ "${args[0]}" = openssh ]; then
+            sed -i "s/^%global ver .*/%global ver ${args[2]}/" spec/openssh.spec
+            docker run --rm -v "$PWD":/src -e SRC_DIR=/src "$image" \
+              bash /src/scripts/build-in-container.sh "${args[1]}"
+            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
+              bash /src/scripts/verify-rpms.sh "${args[1]}"
+            mkdir -p "dist/openssh/${args[1]}"
+            cp "dist/${args[1]}/"* "dist/openssh/${args[1]}/"
+          else
+            if [ "${args[0]}" = ntp ] && [ "$(platform_el "${args[1]}")" = el7 ]; then
+              bash scripts/fetch-ntp-openssl.sh "$PWD" "${args[1]}"
+            fi
+            docker run --rm -v "$PWD":/src -e SRC_DIR=/src "$image" \
+              bash /src/scripts/build-upstream.sh "${args[@]}"
           fi
-          if [ "${args[1]}" = el7 ]; then image="$UBI7_IMAGE"; else image="$UBI8_IMAGE"; fi
-          docker run --rm -v "$PWD":/src -e SRC_DIR=/src "$image" \
-            bash /src/scripts/build-upstream.sh "${args[@]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: built-${{ matrix.package }}-${{ matrix.el }}
@@ -153,18 +145,36 @@ jobs:
           pattern: built-${{ matrix.package }}-${{ matrix.el }}
           path: dist/${{ matrix.package }}/${{ matrix.el }}/
           merge-multiple: true
-      - name: 干净 UBI 中安装并运行
-        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
+      - name: 干净目标系统中安装并运行
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
         env:
           PKG: ${{ matrix.package }}
           EL: ${{ matrix.el }}
           VERSION: ${{ matrix.version }}
         run: |
-          if [ "$EL" = el7 ]; then image="$UBI7_IMAGE"; else image="$UBI8_IMAGE"; fi
+          source scripts/platforms.sh
+          image="$(image_for "$EL")"
+          if [ "$EL" = ubuntu2204 ]; then
+            for s in fresh upgrade reinstall uninstall symlink-guard; do
+              docker run --rm --platform linux/amd64 -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
+                bash /src/scripts/test-openssh-deb.sh "$s" "$VERSION"
+            done
+            exit 0
+          fi
+          if [ "$PKG" = openssh ]; then
+            mkdir -p "dist/$EL"
+            cp "dist/openssh/$EL/"* "dist/$EL/"
+            fail=0
+            for s in fresh upgrade reinstall uninstall symlink-guard; do
+              docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
+                bash /src/scripts/test-install.sh "$EL" "$s" || fail=1
+            done
+            exit "$fail"
+          fi
           docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
             bash /src/scripts/test-upstream-install.sh "$PKG" "$EL" "$VERSION"
       - name: 留下安装成功凭据
-        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
         env:
           PKG: ${{ matrix.package }}
           EL: ${{ matrix.el }}
@@ -172,7 +182,7 @@ jobs:
           mkdir -p verified
           printf '%s/%s\n' "$PKG" "$EL" > "verified/$PKG-$EL"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles(format('dist/{0}/{1}/*.rpm', matrix.package, matrix.el)) != ''
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
         with:
           name: verified-${{ matrix.package }}-${{ matrix.el }}
           path: verified/
@@ -193,12 +203,14 @@ jobs:
           grep -n "%global ver" spec/openssh.spec
       - name: 在官方 UBI7 容器内构建
         run: |
+          source scripts/platforms.sh
           docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
-            "$UBI7_IMAGE" bash /src/scripts/build-in-container.sh el7
+            "$(image_for el7)" bash /src/scripts/build-in-container.sh el7
       - name: 产物质量门禁（verify-rpms）
         run: |
+          source scripts/platforms.sh
           docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-            "$UBI7_IMAGE" bash /src/scripts/verify-rpms.sh el7
+            "$(image_for el7)" bash /src/scripts/verify-rpms.sh el7
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -223,12 +235,14 @@ jobs:
           grep -n "%global ver" spec/openssh.spec
       - name: 在官方 UBI8 容器内构建
         run: |
+          source scripts/platforms.sh
           docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
-            "$UBI8_IMAGE" bash /src/scripts/build-in-container.sh el8
+            "$(image_for el8)" bash /src/scripts/build-in-container.sh el8
       - name: 产物质量门禁（verify-rpms）
         run: |
+          source scripts/platforms.sh
           docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-            "$UBI8_IMAGE" bash /src/scripts/verify-rpms.sh el8
+            "$(image_for el8)" bash /src/scripts/verify-rpms.sh el8
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -251,11 +265,12 @@ jobs:
           path: dist/el7
       - name: 安装行为测试（5 场景，每场景独立干净容器）
         run: |
+          source scripts/platforms.sh
           fail=0
           for s in fresh upgrade reinstall uninstall symlink-guard; do
             echo "########## el7 / $s ##########"
             docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-              "$UBI7_IMAGE" bash /src/scripts/test-install.sh el7 "$s" || fail=1
+              "$(image_for el7)" bash /src/scripts/test-install.sh el7 "$s" || fail=1
           done
           exit $fail
 
@@ -272,11 +287,12 @@ jobs:
           path: dist/el8
       - name: 安装行为测试（5 场景，每场景独立干净容器）
         run: |
+          source scripts/platforms.sh
           fail=0
           for s in fresh upgrade reinstall uninstall symlink-guard; do
             echo "########## el8 / $s ##########"
             docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-              "$UBI8_IMAGE" bash /src/scripts/test-install.sh el8 "$s" || fail=1
+              "$(image_for el8)" bash /src/scripts/test-install.sh el8 "$s" || fail=1
           done
           exit $fail
 
@@ -428,7 +444,7 @@ jobs:
   component-release:
     name: 发布 ${{ matrix.package }} (${{ matrix.el }})
     needs: [check, component-build, component-install, release]
-    # Each package/platform is independent; a failed RPM has no published receipt.
+    # Each package/platform is independent; a failed package has no published receipt.
     if: always() && needs.check.outputs.has_updates == 'true' && inputs.skip_release != true
     strategy:
       fail-fast: false
@@ -444,7 +460,7 @@ jobs:
       SOURCE_URL: ${{ matrix.url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 必须已经通过独立 UBI 安装验证
+      - name: 必须已经通过独立目标系统安装验证
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: verified-${{ matrix.package }}-${{ matrix.el }}
@@ -461,6 +477,10 @@ jobs:
         run: |
           set -euo pipefail
           dir="dist/$PKG/$EL"
+          if [ "$EL" = ubuntu2204 ]; then
+            bash scripts/publish-openssh-deb.sh "$dir" "$VERSION"
+            exit 0
+          fi
           selection="$(bash scripts/select-release-rpm.sh "$dir" "$PKG" "$VERSION" "$EL")"
           IFS=$'\t' read -r rpmfile release <<< "$selection"
           tag="${PKG}-${EL}-${VERSION}-${release}"
@@ -473,10 +493,18 @@ jobs:
               cmp "$file" "$tmp/$(basename "$file")"
             done
           else
+            source scripts/platforms.sh
+            image="$(image_for "$EL")"
+            spec="spec/$PKG/$(platform_el "$EL").spec"
+            if [ "$PKG" = openssh ]; then spec=spec/openssh.spec; fi
+            notes="官方上游源码：$SOURCE_URL；使用仓库 $spec 在 $image 构建，经过干净目标系统安装与命令验证。"
+            if [ "$PKG" = openssh ]; then
+              notes="$notes 已通过上游 regress、RPM 质量门禁与五项安装行为测试。静态链接 OpenSSL/zlib；保留已有配置和 host key，本包安装/升级不主动重启 sshd，旧发行版包卸载脚本仍可能触发重启。升级后请按需手动 service sshd restart；完整说明见仓库 README。"
+            fi
             gh release create "$tag" "$dir"/*.rpm "$dir/SHA256SUMS" \
               "$dir/SOURCE-SHA256SUM" "$dir/$PKG-$EL.spec" \
               --title "$PKG $VERSION RPM ($EL, x86_64)" \
-              --notes "官方上游源码：$SOURCE_URL；使用仓库 spec/$PKG/$EL.spec 在 UBI${EL#el} 构建，经过干净 UBI 安装与命令验证。"
+              --notes "$notes"
           fi
       - name: 安装 RPM 版本比较库
         if: steps.publish.outputs.tag != ''
@@ -497,6 +525,16 @@ jobs:
           python3 - <<'PY'
           import hashlib,json,os,pathlib,shutil
           package,el,version = (os.environ[k] for k in ("PKG","EL","VERSION"))
+          if el == "ubuntu2204":
+              built = pathlib.Path("dist/openssh/ubuntu2204/build.json")
+              target = pathlib.Path("published/metadata/openssh-ubuntu2204.json")
+              target.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copyfile(built,target)
+              receipt = pathlib.Path("published/receipts/openssh-ubuntu2204.json")
+              receipt.parent.mkdir(parents=True,exist_ok=True)
+              receipt.write_text(json.dumps({"package":package,"el":el,"version":version,
+                                            "metadata_sha256":hashlib.sha256(built.read_bytes()).hexdigest()}))
+              raise SystemExit(0)
           built = pathlib.Path("dist")/package/el/(package+"-"+el+".spec")
           target = pathlib.Path("published/spec")/package/(el+".spec")
           target.parent.mkdir(parents=True,exist_ok=True)

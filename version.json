@@ -1,22 +1,29 @@
 {
   "bash": {
+    "centos7": null,
     "el7": "5.3",
     "el8": "5.3"
   },
   "chrony": {
+    "centos7": null,
     "el7": "4.9",
     "el8": "4.9"
   },
   "ntp": {
+    "centos7": null,
     "el7": "4.2.8p18",
     "el8": "4.2.8p18"
   },
   "openssh": "10.6p1",
+  "openssh_centos7": null,
+  "openssh_ubuntu2204": null,
   "sudo": {
+    "centos7": null,
     "el7": "1.9.17p2",
     "el8": "1.9.17p2"
   },
   "telnet": {
+    "centos7": null,
     "el7": "2.8",
     "el8": "2.8"
   }

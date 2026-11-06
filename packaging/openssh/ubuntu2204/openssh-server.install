@@ -1,0 +1,9 @@
+usr/sbin/sshd
+usr/lib/openssh/sshd-*
+usr/share/man/man5/moduli.5
+usr/share/man/man5/sshd_config.5
+usr/share/man/man8/sshd*.8
+usr/share/openssh/sshd_config
+usr/share/openssh/sshd.pam
+usr/share/openssh/ssh.default
+usr/share/openssh/moduli

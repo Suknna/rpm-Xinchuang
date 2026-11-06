@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- --sysconfdir=/etc/ssh --libexecdir=/usr/lib/openssh --with-pam --with-kerberos5 --with-libedit --with-xauth=/usr/bin/xauth --with-privsep-path=/run/sshd --with-default-path=/usr/local/bin:/usr/bin:/bin:/usr/games --with-superuser-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin --with-mantype=man --disable-strip
+
+override_dh_auto_test:
+	# regress groups share host-key fixtures and must not run concurrently.
+	$(MAKE) -j1 tests
+
+override_dh_auto_install:
+	$(MAKE) install-nokeys DESTDIR=$(CURDIR)/debian/tmp
+	install -d debian/tmp/usr/share/openssh
+	install -m644 moduli debian/tmp/usr/share/openssh/moduli
+	install -m644 debian/ssh_config debian/sshd_config debian/sshd.pam debian/ssh.default debian/tmp/usr/share/openssh/
+	# No /etc payload: dpkg retains old conffiles as obsolete; postinst only
+	# seeds genuinely missing paths, including protection for dangling symlinks.
+	rm -rf debian/tmp/etc debian/tmp/var
+
+override_dh_installsystemd:
+	dh_installsystemd -popenssh-server --name=ssh --no-start --no-stop-on-upgrade ssh.service
+	# Preserve existing opt-in socket activation; do not enable it on fresh installs.
+	dh_installsystemd -popenssh-server --name=ssh --no-enable --no-start --no-stop-on-upgrade ssh.socket ssh@.service
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 4755 debian/openssh-client/usr/lib/openssh/ssh-keysign
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym

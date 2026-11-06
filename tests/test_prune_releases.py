@@ -30,9 +30,22 @@ class ReleaseRetentionTest(unittest.TestCase):
         self.pages[-1].append(release)
         if key is None:
             return release
-        platforms = ("el7", "el8") if key.package == "openssh" else (key.el,)
+        if key.el == "ubuntu2204":
+            checksums = []
+            for package in ("openssh-client", "openssh-server", "openssh-sftp-server"):
+                name = f"{package}_{key.version}-{key.release}_amd64.deb"
+                data = name.encode()
+                checksum = hashlib.sha256(data).hexdigest()
+                release["assets"].append({"name": name, "size": len(data), "state": "uploaded", "digest": "sha256:" + checksum})
+                self.downloads[tag, name] = data
+                checksums.append(checksum + "  ./" + name)
+            self.downloads[tag, "SHA256SUMS"] = "\n".join(checksums) + "\n"
+            for name in ("SHA256SUMS", "build.json", "SOURCE-SHA256SUM", "changelog"):
+                release["assets"].append({"name": name, "size": 100, "state": "uploaded"})
+            return release
+        platforms = ("el7", "el8") if key.el == "all" else (key.el,)
         for el in platforms:
-            revision = key.release + "." + el if key.package == "openssh" else key.release
+            revision = key.release + "." + el if key.el == "all" else key.release
             packages = ("openssh", "openssh-clients", "openssh-server") if key.package == "openssh" else (key.package, key.package + "-devel")
             checksums = []
             for package in packages:
@@ -42,7 +55,7 @@ class ReleaseRetentionTest(unittest.TestCase):
                 release["assets"].append({"name": name, "size": len(data), "state": "uploaded", "digest": "sha256:" + checksum})
                 self.downloads[tag, name] = data
                 checksums.append(checksum + "  ./" + name)
-            manifest = "SHA256SUMS-" + el if key.package == "openssh" else "SHA256SUMS"
+            manifest = "SHA256SUMS-" + el if key.el == "all" else "SHA256SUMS"
             self.downloads[tag, manifest] = "\n".join(checksums) + "\n"
             release["assets"].append({"name": manifest, "size": len(self.downloads[tag, manifest]), "state": "uploaded"})
         return release
@@ -72,7 +85,7 @@ class ReleaseRetentionTest(unittest.TestCase):
         self.assertEqual(prune_releases.prune("owner/repo", current["tag_name"]), keeper["tag_name"])
         self.assertCountEqual(self.deleted, [old["id"], current["id"]])
         for release in (other_el, other_component, unrelated, keeper):
-            self.assertNotIn(release["id"], self.deleted)
+                self.assertNotIn(release["id"], self.deleted)
 
     def test_sudo_patchlevel_and_rpm_distro_revision_are_compared_numerically(self):
         for old_tag, new_tag in (
@@ -98,6 +111,29 @@ class ReleaseRetentionTest(unittest.TestCase):
         for el in ("el7", "el8"):
             self.api.assert_any_call("release", "download", keeper["tag_name"], "--repo", "owner/repo", "--pattern", "SHA256SUMS-" + el, "--output", "-")
 
+    def test_centos_retention_never_deletes_ubi_releases(self):
+        for package, version, ubi_tag in (("chrony", "4.9", "chrony-el7-4.9-1.el7"),
+                                          ("openssh", "10.6p1", "v10.6p1-2")):
+            with self.subTest(package=package):
+                self.pages = [[]]
+                self.deleted.clear()
+                ubi = self.release(ubi_tag)
+                old = self.release("%s-centos7-%s-1.centos7" % (package, version))
+                keeper = self.release("%s-centos7-%s-2.centos7" % (package, version))
+                self.assertEqual(prune_releases.prune("owner/repo", keeper["tag_name"]), keeper["tag_name"])
+                self.assertEqual(self.deleted, [old["id"]])
+                self.deleted.clear()
+                prune_releases.prune("owner/repo", ubi["tag_name"])
+                self.assertEqual(self.deleted, [])
+
+    def test_incomplete_centos_openssh_cannot_delete_previous_release(self):
+        self.release("openssh-centos7-10.5p1-2.centos7")
+        keeper = self.release("openssh-centos7-10.6p1-2.centos7")
+        keeper["assets"] = [asset for asset in keeper["assets"] if "openssh-server-" not in asset["name"]]
+        with self.assertRaisesRegex(ValueError, "primary RPM"):
+            prune_releases.prune("owner/repo", keeper["tag_name"])
+        self.assertEqual(self.deleted, [])
+
     def test_failed_openssh_platform_preserves_all_existing_releases(self):
         self.release("v10.5p1-2")
         keeper = self.release("v10.6p1-2")
@@ -112,7 +148,8 @@ class ReleaseRetentionTest(unittest.TestCase):
         draft["draft"] = True
         preview = self.release("bash-el7-5.5-1.el7")
         preview["prerelease"] = True
-        for tag in ("bash-el7-6.0-1.el8", "bash-el7-6.1-custom", "v99.0", "vim-el7-9.2-1.el7"):
+        for tag in ("bash-el7-6.0-1.el8", "bash-el7-6.1-custom", "v99.0", "vim-el7-9.2-1.el7",
+                    "bash-centos7-6.0-1.el7", "openssh-el7-10.6p1-2.el7"):
             self.release(tag)
         self.assertEqual(prune_releases.prune("owner/repo", current["tag_name"]), current["tag_name"])
         self.assertEqual(self.deleted, [])
@@ -193,6 +230,44 @@ class ReleaseRetentionTest(unittest.TestCase):
         self.release("bash-el7-5.2-1.el7")
         keeper = self.release("bash-el7-5.3-1.el7")
         self.assertEqual(prune_releases.prune("owner/repo", keeper["tag_name"], dry_run=True), keeper["tag_name"])
+        self.assertEqual(self.deleted, [])
+
+    def test_ubuntu_numeric_revision_retention_is_isolated_from_rpm(self):
+        rpm = self.release("v10.6p1-2")
+        centos = self.release("openssh-centos7-10.6p1-2.centos7")
+        old = self.release("openssh-ubuntu2204-10.6p1-2ubuntu22.04")
+        keeper = self.release("openssh-ubuntu2204-10.6p1-10ubuntu22.04")
+        self.assertEqual(prune_releases.prune("owner/repo", old["tag_name"]), keeper["tag_name"])
+        self.assertEqual(self.deleted, [old["id"]])
+        self.assertNotIn(rpm["id"], self.deleted)
+        self.assertNotIn(centos["id"], self.deleted)
+
+    def test_missing_or_corrupt_ubuntu_debs_never_delete_fallback(self):
+        self.release("openssh-ubuntu2204-10.5p1-2ubuntu22.04")
+        current = self.release("openssh-ubuntu2204-10.6p1-2ubuntu22.04")
+        asset = current["assets"].pop(0)
+        with self.assertRaisesRegex(ValueError, "DEB assets"):
+            prune_releases.prune("owner/repo", current["tag_name"])
+        current["assets"].append(asset)
+        asset["digest"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            prune_releases.prune("owner/repo", current["tag_name"])
+        self.assertEqual(self.deleted, [])
+
+    def test_ubuntu_manifest_must_be_complete_and_dry_run_never_deletes(self):
+        self.release("openssh-ubuntu2204-10.5p1-2ubuntu22.04")
+        current = self.release("openssh-ubuntu2204-10.6p1-2ubuntu22.04")
+        manifest = current["tag_name"], "SHA256SUMS"
+        original = self.downloads[manifest]
+        for contents in ("", original.splitlines()[0], original + original, "invalid\n"):
+            self.downloads[manifest] = contents
+            with self.assertRaisesRegex(ValueError, "checksum manifest"):
+                prune_releases.prune("owner/repo", current["tag_name"])
+            self.assertEqual(self.deleted, [])
+        self.downloads[manifest] = original
+        for asset in current["assets"]:
+            asset.pop("digest", None)
+        self.assertEqual(prune_releases.prune("owner/repo", current["tag_name"], dry_run=True), current["tag_name"])
         self.assertEqual(self.deleted, [])
 
     def test_old_retry_does_not_allow_version_writeback(self):

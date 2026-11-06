@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RPM 安装行为测试：在干净的官方 UBI 容器内运行。
+# RPM 安装行为测试：在干净的官方 UBI / CentOS 容器内运行。
 #
 # 用法（宿主机，见 local-test.sh）：
 #   docker run --rm -v "$PWD":/src registry.access.redhat.com/ubi7/ubi:latest \
@@ -18,10 +18,13 @@
 # 任一断言失败都会使脚本以非零退出。
 set -uo pipefail
 
-EL="${1:?usage: test-install.sh <el7|el8> <fresh|upgrade|reinstall|uninstall>}"
-SCENARIO="${2:?usage: test-install.sh <el7|el8> <fresh|upgrade|reinstall|uninstall>}"
+PLATFORM="${1:?usage: test-install.sh <el7|el8|centos7> <scenario>}"
+SCENARIO="${2:?missing scenario}"
 SRC="${SRC_DIR:-/src}"
-DIST="/src/dist/$EL"
+# shellcheck source=scripts/platforms.sh
+source "$SRC/scripts/platforms.sh"
+EL="$(platform_el "$PLATFORM")" || exit 2
+DIST="$SRC/dist/$PLATFORM"
 MARKER="# RPM-XINCHUANG-TEST-MARKER"
 
 FAILURES=0
@@ -46,7 +49,7 @@ assert_contains() {
 	esac
 }
 
-source /src/scripts/repos-common.sh
+source "$SRC/scripts/repos-common.sh"
 
 PM_INSTALL() { # 用包管理器安装本地 rpm（自动解析依赖；测试工具链由 ensure_test_deps 前置补齐）
 	if [ "$EL" = el7 ]; then
@@ -102,7 +105,7 @@ keys_state() { # 所有 host key 内容指纹的组合校验值（检测密钥�
 
 config_state() { sha256sum /etc/ssh/sshd_config 2>/dev/null | awk '{print $1}'; }
 
-echo "=== [$EL/$SCENARIO] 仓库配置（gpgcheck 全开）"
+echo "=== [$PLATFORM/$SCENARIO] 仓库配置（gpgcheck 全开）"
 case "$EL" in
 el7) configure_repos_el7 ;;
 el8) configure_repos_el8 ;;
@@ -330,5 +333,5 @@ symlink-guard)
 	;;
 esac
 
-echo "=== [$EL/$SCENARIO] 结果: ${FAILURES} failure(s)"
+echo "=== [$PLATFORM/$SCENARIO] 结果: ${FAILURES} failure(s)"
 exit $((FAILURES > 0))

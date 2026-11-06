@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
-# 在官方 UBI 容器内执行的单平台构建脚本。
+# 在官方 UBI / CentOS 容器内执行的单平台构建脚本。
 #
 # 用法（宿主机）：
 #   docker run --rm -v "$PWD":/src registry.access.redhat.com/ubi7/ubi:latest \
 #       bash /src/scripts/build-in-container.sh el7
-#   （el8 同理换镜像与参数；GitHub Actions 中使用同一调用方式）
+#   （el8 / centos7 同理换镜像与参数；本地推荐使用 local-build.sh）
 #
 # 步骤：配置补充源(全 gpgcheck=1) → 安装构建依赖 → 下载源码 →
 #       OpenSSH tarball GPG 验签 + OpenSSL SHA256 校验 → rpmbuild →
-#       产物复制到 /src/dist/<el>/ 并输出 SHA256SUMS。
+#       产物复制到 /src/dist/<platform>/ 并输出 SHA256SUMS。
 set -euo pipefail
 
-EL="${1:?usage: build-in-container.sh <el7|el8>}"
+PLATFORM="${1:?usage: build-in-container.sh <el7|el8|centos7>}"
 SRC="${SRC_DIR:-/src}"
 cd "$SRC"
 
-case "$EL" in
-el7 | el8) ;;
-*) echo "ERROR: unknown EL '$EL' (expect el7|el8)" >&2; exit 2 ;;
-esac
+# shellcheck source=scripts/platforms.sh
+source "$SRC/scripts/platforms.sh"
+EL="$(platform_el "$PLATFORM")"
 
 # shellcheck source=repos-common.sh
 source "$(dirname "$0")/repos-common.sh"
 
-echo "== [$EL] 配置 yum/dnf 源（gpgcheck 全开）"
+echo "== [$PLATFORM] 配置 yum/dnf 源（gpgcheck 全开）"
 "configure_repos_$EL"
-echo "== [$EL] 安装构建依赖"
+echo "== [$PLATFORM] 安装构建依赖"
 install_build_deps "$EL" "$SRC/spec/openssh.spec"
 
 # spec 是版本唯一来源（避免两处维护漂移）
@@ -33,10 +32,10 @@ VER="$(sed -n 's/^%global ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr 
 SSL_VER="$(sed -n 's/^%global ssl_ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr -d '[:space:]')"
 ZLIB_VER="$(sed -n 's/^%global zlib_ver[[:space:]]\+//p' spec/openssh.spec | head -1 | tr -d '[:space:]')"
 [ -n "$VER" ] && [ -n "$SSL_VER" ] && [ -n "$ZLIB_VER" ] || { echo "ERROR: cannot parse ver/ssl_ver from spec" >&2; exit 2; }
-echo "== [$EL] OpenSSH=$VER OpenSSL=$SSL_VER zlib=$ZLIB_VER"
+echo "== [$PLATFORM] OpenSSH=$VER OpenSSL=$SSL_VER zlib=$ZLIB_VER"
 
-# 按平台隔离 rpmbuild 顶层目录，允许 el7/el8 并行构建互不干扰
-RPM_TOP="$SRC/.rpmbuild/$EL"
+# 按构建平台隔离，CentOS 7 与 UBI7 也不能共用工作目录。
+RPM_TOP="$SRC/.rpmbuild/$PLATFORM"
 mkdir -p "$RPM_TOP"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 SOURCES="$RPM_TOP/SOURCES"
 install -m644 "$SRC/source-assets/openssh/sshd.pam" "$SOURCES/sshd.pam"
@@ -54,7 +53,7 @@ fetch() { # fetch <output> <url> [<url>...] 依次尝试直到成功
 	return 1
 }
 
-echo "== [$EL] 下载并校验源码包"
+echo "== [$PLATFORM] 下载并校验源码包"
 fetch "$SOURCES/openssh-${VER}.tar.gz" \
 	"https://mirrors.aliyun.com/pub/OpenBSD/OpenSSH/portable/openssh-${VER}.tar.gz" \
 	"https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${VER}.tar.gz"
@@ -97,23 +96,26 @@ for TGZ in "$SSL_TGZ" "$ZLIB_TGZ"; do
 	echo "${TGZ} SHA256 OK"
 done
 
-echo "== [$EL] rpmbuild"
+echo "== [$PLATFORM] rpmbuild"
 cp -f "$SRC/spec/openssh.spec" "$RPM_TOP/SPECS/"
 # A reused local build tree must not publish old releases alongside this one.
 rm -f "$RPM_TOP"/RPMS/x86_64/openssh-*.rpm
 rpmbuild -bb \
-	--define "dist .${EL}" \
+	--define "dist .${PLATFORM}" \
 	--define 'debug_package %{nil}' \
 	--define "_topdir $RPM_TOP" \
 	"$RPM_TOP/SPECS/openssh.spec"
 
-echo "== [$EL] OpenSSH 上游 regress 测试"
+echo "== [$PLATFORM] OpenSSH 上游 regress 测试"
 bash "$SRC/scripts/test-openssh-upstream.sh" "$EL" "$RPM_TOP/BUILD/openssh-$VER"
 
-echo "== [$EL] 收集产物"
-mkdir -p "$SRC/dist/$EL"
-rm -f "$SRC/dist/$EL"/openssh-*.rpm
-cp -f "$RPM_TOP"/RPMS/x86_64/*.rpm "$SRC/dist/$EL/"
-( cd "$SRC/dist/$EL" && sha256sum ./*.rpm | tee SHA256SUMS )
-echo "== [$EL] DONE"
-ls -l "$SRC/dist/$EL"
+echo "== [$PLATFORM] 收集产物"
+OUT="$SRC/dist/$PLATFORM"
+mkdir -p "$OUT"
+rm -f "$OUT"/openssh-*.rpm
+cp -f "$RPM_TOP"/RPMS/x86_64/*.rpm "$OUT/"
+cp "$RPM_TOP/SPECS/openssh.spec" "$OUT/openssh-$PLATFORM.spec"
+( cd "$SOURCES" && sha256sum "openssh-${VER}.tar.gz" ) > "$OUT/SOURCE-SHA256SUM"
+( cd "$OUT" && sha256sum ./*.rpm | tee SHA256SUMS )
+echo "== [$PLATFORM] DONE"
+ls -l "$OUT"

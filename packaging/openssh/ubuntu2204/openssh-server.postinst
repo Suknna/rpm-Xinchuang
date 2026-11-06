@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if ! getent passwd sshd >/dev/null; then
+        adduser --quiet --system --group --no-create-home --home /run/sshd --shell /usr/sbin/nologin sshd
+    fi
+    mkdir -p /etc/ssh/sshd_config.d /etc/pam.d /etc/default
+    seed() {
+        if [ ! -e "$2" ] && [ ! -L "$2" ]; then
+            install -m644 "$1" "$2"
+        fi
+    }
+    seed /usr/share/openssh/sshd_config /etc/ssh/sshd_config
+    seed /usr/share/openssh/moduli /etc/ssh/moduli
+    seed /usr/share/openssh/sshd.pam /etc/pam.d/sshd
+    seed /usr/share/openssh/ssh.default /etc/default/ssh
+    echo 'OpenSSH installed. Validate configuration, then activate with: systemctl restart ssh'
+fi
+#DEBHELPER#

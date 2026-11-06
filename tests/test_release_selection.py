@@ -41,6 +41,16 @@ class ReleaseSelectionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), f"{rpm}\t2.el7")
 
+    def test_centos_selection_cannot_pick_ubi_rpm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (pathlib.Path(directory) / "openssh-10.6p1-2.el7.x86_64.rpm").touch()
+            self.assertNotEqual(self.select(directory, "openssh", "10.6p1", "centos7").returncode, 0)
+            rpm = pathlib.Path(directory) / "openssh-10.6p1-2.centos7.x86_64.rpm"
+            rpm.touch()
+            result = self.select(directory, "openssh", "10.6p1", "centos7")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), f"{rpm}\t2.centos7")
+
     def test_missing_and_duplicate_main_rpms_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertNotEqual(self.select(directory, "vim", "9.2.1135", "el8").returncode, 0)

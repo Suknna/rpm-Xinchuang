@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Verify binary RPM installation and a real command in a fresh UBI container.
+# Verify binary RPM installation and a real command in a fresh platform container.
 set -euo pipefail
-PKG="${1:?usage: test-upstream-install.sh <package> <el7|el8> <version>}"
-EL="${2:?missing platform}"
+PKG="${1:?usage: test-upstream-install.sh <package> <el7|el8|centos7> <version>}"
+PLATFORM="${2:?missing platform}"
 VER="${3:?missing version}"
 SRC="${SRC_DIR:-/src}"
-DIST="$SRC/dist/$PKG/$EL"
+# shellcheck source=scripts/platforms.sh
+source "$SRC/scripts/platforms.sh"
+EL="$(platform_el "$PLATFORM")"
+DIST="$SRC/dist/$PKG/$PLATFORM"
 
 test_chrony_daemon() {
   # No external NTP traffic and no access to the system clock (-x, port 0).
@@ -60,7 +63,7 @@ case "$PKG" in
   bash) /bin/bash -c '[[ $(printf ok) == ok ]]' && /bin/bash --version | grep -F "$VER" ;;
   sudo) if [ "$EL" = el7 ]; then yum -y -q install cpio shadow-utils util-linux
         else dnf -y -q install cpio shadow-utils util-linux; fi
-        bash "$SRC/scripts/verify-pam-rpms.sh" sudo "$DIST/sudo-$VER-"*."$EL".x86_64.rpm
+        bash "$SRC/scripts/verify-pam-rpms.sh" sudo "$DIST/sudo-$VER-"*."$PLATFORM".x86_64.rpm
         sudo -V | grep -F "$VER"; test -f /etc/sudoers
         test -s /etc/pam.d/sudo && test -s /etc/pam.d/sudo-i
         sudo -n /usr/bin/true
@@ -96,4 +99,4 @@ case "$PKG" in
           else /usr/libexec/platform-python "$SRC/scripts/test-telnet-negotiation.py"; fi ;;
   *) exit 2 ;;
 esac
-echo "$PKG $VER on $EL installed and ran successfully"
+echo "$PKG $VER on $PLATFORM installed and ran successfully"

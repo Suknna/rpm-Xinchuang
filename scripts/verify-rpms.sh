@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# RPM 构建产物质量门禁（在 UBI 容器内运行，位于安装行为测试之前）。
-# 用法: verify-rpms.sh <el7|el8>
+# RPM 构建产物质量门禁（在对应平台容器内运行，位于安装行为测试之前）。
+# 用法: verify-rpms.sh <el7|el8|centos7>
 #
 # 检查项：
 #   1. 三包齐全且 EVR/arch 正确（openssh / clients / server, x86_64）
@@ -11,8 +11,13 @@
 #   6. 模板文件与 ghost 声明齐全；server 运行依赖正确
 set -uo pipefail
 
-EL="${1:?usage: verify-rpms.sh <el7|el8>}"
+EL="${1:?usage: verify-rpms.sh <el7|el8|centos7>}"
 DIST="${SRC_DIR:-/src}/dist/$EL"
+# EL here is the RPM suffix, not the underlying packaging platform.
+source "${SRC_DIR:-/src}/scripts/platforms.sh"
+BASE_EL="$(platform_el "$EL")" || exit 2
+source "${SRC_DIR:-/src}/scripts/repos-common.sh"
+"configure_repos_$BASE_EL" || exit 1
 FAIL=0
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1" >&2; FAIL=$((FAIL + 1)); }

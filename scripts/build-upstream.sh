@@ -2,11 +2,14 @@
 # Build an upstream source archive with the packaging spec maintained in this repo.
 set -euo pipefail
 
-PKG="${1:?usage: build-upstream.sh <package> <el7|el8> <version> <https-source-url>}"
-EL="${2:?missing platform}"
+PKG="${1:?usage: build-upstream.sh <package> <el7|el8|centos7> <version> <https-source-url>}"
+PLATFORM="${2:?missing platform}"
 VER="${3:?missing version}"
 URL="${4:?missing source URL}"
 SRC="${SRC_DIR:-/src}"
+# shellcheck source=scripts/platforms.sh
+source "$SRC/scripts/platforms.sh"
+EL="$(platform_el "$PLATFORM")"
 case "$PKG:$EL" in
   vim:el7|vim:el8) echo "Vim builds are temporarily disabled" >&2; exit 2 ;;
   bash:el7|bash:el8|chrony:el7|chrony:el8|sudo:el7|sudo:el8|ntp:el7|ntp:el8|telnet:el7|telnet:el8) ;;
@@ -24,11 +27,14 @@ else
   dnf -y -q install rpm-build dnf-plugins-core curl cpio gcc gcc-c++ make tar gzip redhat-rpm-config
 fi
 
-TOP="$SRC/.rpmbuild/upstream-$PKG-$EL"
-OUT="$SRC/dist/$PKG/$EL"
-SPEC="$SRC/spec/$PKG/$EL.spec"
-test -f "$SPEC"
+TOP="$SRC/.rpmbuild/upstream-$PKG-$PLATFORM"
+OUT="$SRC/dist/$PKG/$PLATFORM"
+SOURCE_SPEC="$SRC/spec/$PKG/$EL.spec"
+test -f "$SOURCE_SPEC"
 mkdir -p "$TOP"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$OUT"
+# Each platform edits its own copy; CentOS 7 must not change the shared EL7 spec.
+SPEC="$TOP/SPECS/$PKG.spec"
+cp "$SOURCE_SPEC" "$SPEC"
 if [ -d "$SRC/source-assets/$PKG/$EL" ]; then
   cp -a "$SRC/source-assets/$PKG/$EL/." "$TOP/SOURCES/"
 fi
@@ -46,7 +52,7 @@ case "$PKG" in
   *) source_number= ;;
 esac
 if [ -n "$source_number" ]; then
-  auxiliary_url="$(rpmspec -P --define "dist .$EL" "$SPEC" | sed -n "s/^Source${source_number}:[[:space:]]*//p")"
+  auxiliary_url="$(rpmspec -P --define "dist .$PLATFORM" "$SPEC" | sed -n "s/^Source${source_number}:[[:space:]]*//p")"
   [[ "$auxiliary_url" == https://* ]] || { echo "invalid auxiliary source URL: $auxiliary_url" >&2; exit 1; }
   auxiliary_file="${auxiliary_url##*/}"
   expected_sha="$(awk -v name="$auxiliary_file" '$1 == name ":" {sub(/^sha256:/, "", $2); print $2}' "$SRC/certs/checksums.yaml")"
@@ -74,7 +80,7 @@ else
 fi
 # Reused local build trees may retain older releases; never collect stale RPMs.
 rm -f "$TOP"/RPMS/{x86_64,noarch}/*.rpm
-rpmbuild -bb --define "_topdir $TOP" --define "dist .$EL" "$SPEC"
+rpmbuild -bb --define "_topdir $TOP" --define "dist .$PLATFORM" "$SPEC"
 shopt -s nullglob
 rpms=("$TOP"/RPMS/{x86_64,noarch}/*.rpm)
 [ "${#rpms[@]}" -gt 0 ] || { echo "no RPMs produced" >&2; exit 1; }
@@ -86,5 +92,5 @@ for rpmfile in "${rpms[@]}"; do
   }
   cp "$rpmfile" "$OUT/"
 done
-cp "$SPEC" "$OUT/$PKG-$EL.spec"
+cp "$SPEC" "$OUT/$PKG-$PLATFORM.spec"
 (cd "$OUT" && sha256sum ./*.rpm > SHA256SUMS && sha256sum -c SHA256SUMS)
