@@ -15,7 +15,7 @@
     "el8": "4.2.8p18"
   },
   "openssh": "10.6p2",
-  "openssh_centos7": null,
+  "openssh_centos7": "10.6p2",
   "openssh_ubuntu2204": "10.6p2",
   "sudo": {
     "centos7": "1.9.17p2",
