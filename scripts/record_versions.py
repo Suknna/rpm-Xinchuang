@@ -8,6 +8,9 @@
 * 只认新格式；较低或同版本补发不得回退基线（版本比较与检测侧一致）。
 * receipt 校验（身份 + 哈希 + 构建 spec/元数据一致性）集中在 read_receipt：
   record 与 prune 的清理前置预检共用同一实现，保证「校验不过不删除」。
+* 平台独立回写：可选 --platform 限定本批凭据平台（artifact 下载 pattern 误
+  带入的其他平台凭据，含前缀相似平台，写盘前拒绝）；预检全部凭据后才写盘，
+  一张坏凭据 = 零写入。
 * RPM 身份校验用 rpm.spec 宏展开（真实共享 spec 的 Version/Release 是
   %{ver}/2%{?dist} 形态，禁止用未展开原文比较）。
 """
@@ -98,13 +101,21 @@ def read_receipt(receipt, get_target=None):
     return row
 
 
-def record(version_file, receipts, get_target=None):
+def record(version_file, receipts, get_target=None, platform=None):
     path = pathlib.Path(version_file)
     state = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(state.get("platforms"), dict):
         raise ValueError("unsupported version.json format: expected {'platforms': {...}}")
+    # 预检全部 receipt（身份 + 哈希 + 平台 scope）之后才动 state / 写盘：一张
+    # 坏凭据 = 零写入；平台 scope 用精确字段比较，前缀相似平台绝不混淆。
+    rows = []
     for receipt in receipts:
         row = read_receipt(receipt, get_target=get_target)
+        if platform is not None and row["platform"] != platform:
+            raise ValueError("receipt platform %r is outside platform scope %r: %s"
+                             % (row["platform"], platform, receipt))
+        rows.append(row)
+    for row in rows:
         platforms = state["platforms"].setdefault(row["platform"], {})
         current = platforms.get(row["package"])
         if current is None or check_versions.is_newer([row["version"]], current):
@@ -115,11 +126,13 @@ def record(version_file, receipts, get_target=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--platform",
+                        help="限定本批凭据平台；其他平台（含前缀相似）的凭据写盘前拒绝")
     parser.add_argument("version_file")
     parser.add_argument("receipts", nargs="+")
     args = parser.parse_args(argv)
     try:
-        record(args.version_file, args.receipts)
+        record(args.version_file, args.receipts, platform=args.platform)
     except (ValueError, KeyError, OSError, rpm.error) as exc:
         print("ERROR: " + str(exc), file=sys.stderr)
         return 1

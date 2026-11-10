@@ -1,36 +1,35 @@
-# rpm-Xinchuang：平台优先目录 + 统一 (platform, package) 矩阵的 RPM/DEB 构建发布流水线
+# rpm-Xinchuang：平台独立检测→构建→发布的父子流水线编排。
 #
 # 触发：
-#   * schedule：北京时间每天 09:17（UTC 01:17）通过 Anitya 检测全部启用上游版本；
+#   * schedule：北京时间每天 09:17（UTC 01:17）；
 #   * workflow_dispatch：受控手动运行（强制版本 / 指定组合 / 仅构建 / 清理演练）。
 #
 # 安全边界：
 #   * 无 pull_request 触发——外部 PR 永远不会拿到本仓库的任何 token；
-#   * 默认仅 contents:read，仅 publish / finalize 两个 job 需要 contents:write；
-#   * GITHUB_TOKEN 仅对本仓库有效；
-#   * 所有第三方 action 固定到 commit SHA；基础镜像在 platforms/<id>/platform.yaml
-#     以 digest 固定。
+#   * 顶层 contents:read；唯一进入子流水线的 platform job 声明 contents:write，
+#     它是子流水线（platform.yml）写权限的硬上限——子内部仅 publish/finalize
+#     提升；maintain-merged / scheduled-time 各自最小声明 write；
+#   * 不使用 secrets:inherit：子流水线只用 github.token（随调用方权限派生），
+#     GITHUB_TOKEN 仅对本仓库有效；
+#   * 顶层 concurrency 串行排队整个运行（cancel-in-progress:false），子流水线
+#     不定义并发组；所有第三方 action 固定到 commit SHA，基础镜像在
+#     platforms/<id>/platform.yaml 以 digest 固定。
 #
 # 调度契约（构建/验证统一入口 scripts/package.sh，配置唯一来源 scripts/project_config.py）：
-#   * check 输出统一矩阵 {platform, package, version, url}，OpenSSH 所有平台与
-#     组件一起进入矩阵，没有旧专用 build/test/release job；本地行为测试（tests）
-#     是发布链的一等门禁：build → test → publish → finalize 全部 needs tests，
-#     并在 always() 条件里显式要求 tests 成功；
-#   * build → test → publish 三段按 built-<platform>-<package> /
-#     verified-<platform>-<package> / receipt-<platform>-<package> 工件精确关联，
-#     fail-fast:false，单个组合失败绝不阻断其他已验证组合发布；
-#   * 每个宿主 job 独立安装自身依赖（python3-yaml / python3-rpm），宿主 Python
-#     统一显式 /usr/bin/python3；
-#   * publish 每组合幂等发布独立 Release（tag <platform>-<package>-<version>-<release>，
-#     资产只有包文件 + SHA256SUMS；创建成功后仍需远程逐字节校验通过才写凭据），
-#     并上传 published/ 凭据工件；
-#   * finalize 单进程串行收口：receipt 全量预检 → 先校验后清理历史 Release
-#     （保留 Git tag）→ 回写 version.json 成功基线（唯一回写对象，永不改写源
-#     spec）。校验失败不删除、不回写；dry_run 只演练清理；skip_release 跳过
-#     publish/finalize 全部写操作。
-#   * 并发安全：concurrency 串行排队；finalize 回写每轮强制回到最新远端分支、
-#     重放 receipt（record 自带防降级）再提交推送——不使用 rebase，冲突残留
-#     不会累积，并发更新的更高基线不会被覆盖。
+#   * discover：本地配置自动发现启用平台（check_versions.discover，全程无网络），
+#     平台清单由启用 target（iter_targets）派生，新增平台零代码进入；同时预检
+#     全局输入——targets 语法/未知组合是真错误，force/version 互斥在此拦截；
+#   * tests：全局共享代码质量门控（本地行为测试是一等门禁），所有平台链的先决
+#     条件，在父级只跑一次；
+#   * platform：矩阵 fail-fast:false，逐平台调用本地可复用 platform.yml——每个
+#     平台完整独立链 check（先 --platform 本地 scope 再网络 fetch）→build→test
+#     →publish→finalize，单平台上游故障或构建失败绝不阻断其他平台；无更新平台
+#     check 成功 skip，平台整体仍为 success；
+#   * maintain-merged：全平台结束（always）后单例运行，tests/discover 成功且非
+#     skip_release 才执行单一 prune --merged-only——只维护已被全面替代的跨平台
+#     旧合并 Release，无凭据、不写基线，与平台结果无关；
+#   * scheduled-time：仅当全平台成功且维护成功才记录时间（schedule 专属；回写
+#     每轮强制回到最新远端分支，无 rebase 状态残留，push 冲突退避重试）。
 name: rpm-Xinchuang
 
 on:
@@ -46,10 +45,12 @@ on:
       version:
         description: '强制构建的 OpenSSH 版本（格式 X.YpZ，留空=自动检测）'
         required: false
+        type: string
         default: ''
       targets:
-        description: '仅构建指定组合（chrony、chrony/el8、chrony@4.9、chrony/el8@4.9，逗号分隔；缺省版本用已发布基线，否则上游最新）'
+        description: '仅构建指定组合（pkg、pkg/platform、pkg@ver、pkg/platform@ver，逗号分隔；缺省版本用已发布基线，否则上游最新）'
         required: false
+        type: string
         default: ''
       skip_release:
         description: '仅构建验证，不发布 Release、不清理、不回写'
@@ -69,11 +70,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
+  discover:
+    name: 本地配置自动发现平台（无网络）
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.detect.outputs.matrix }}
-      has_updates: ${{ steps.detect.outputs.has_updates }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,18 +82,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-yaml
-      - name: 检测启用上游相对各平台基线的更新
-        id: detect
+      - name: 本地校验全局输入并发现启用平台
+        id: platforms
         env:
-          FORCE_VERSION: ${{ github.event.inputs.version }}
           FORCE: ${{ inputs.force }}
-          TARGETS: ${{ github.event.inputs.targets }}
+          FORCE_VERSION: ${{ inputs.version }}
+          TARGETS: ${{ inputs.targets }}
         run: |
-          args=()
-          [ -n "$FORCE_VERSION" ] && args+=(--openssh-version "$FORCE_VERSION")
-          [ "$FORCE" = true ] && args+=(--force)
-          [ -n "$TARGETS" ] && args+=(--targets "$TARGETS")
-          /usr/bin/python3 scripts/check_versions.py --output "$GITHUB_OUTPUT" "${args[@]}"
+          /usr/bin/python3 - <<'PYEOF'
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, "scripts")
+          import check_versions
+
+          # 平台清单由启用 target 派生（新增平台零改动）；global targets 复用
+          # parse_selection 预检，语法/未知组合是真错误，全程无网络。
+          platforms = check_versions.discover(
+              targets=os.environ.get("TARGETS", "").strip(),
+              force=os.environ.get("FORCE") == "true",
+              openssh_version=os.environ.get("FORCE_VERSION", "").strip())
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("platforms=" + json.dumps(platforms) + "\n")
+          print("platforms:", ", ".join(platforms))
+          PYEOF
 
   tests:
     name: 本地行为测试
@@ -107,211 +121,68 @@ jobs:
       - name: 运行本地行为测试
         run: /usr/bin/python3 -m unittest discover -s tests -v
 
-  build:
-    name: 构建 ${{ matrix.package }} (${{ matrix.platform }})
-    needs: [check, tests]
-    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success'
+  platform:
+    name: 平台流水线 ${{ matrix.platform }}
+    needs: [discover, tests]
+    if: needs.discover.result == 'success' && needs.tests.result == 'success'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
-    runs-on: ubuntu-latest
-    env:
-      PLATFORM: ${{ matrix.platform }}
-      PACKAGE: ${{ matrix.package }}
-      VERSION: ${{ matrix.version }}
-      URL: ${{ matrix.url }}
-      PYTHON: /usr/bin/python3
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 安装配置解析依赖（job 隔离，不依赖其他 job 的安装）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-yaml
-      - name: 统一构建入口（含产物门禁）
-        run: |
-          set -euo pipefail
-          eval "$(/usr/bin/python3 scripts/project_config.py shell "$PLATFORM" "$PACKAGE")"
-          cmd=(bash scripts/package.sh build "$PLATFORM" "$PACKAGE" "$VERSION")
-          # OpenSSH 源与镜像固定，构建不接收 URL；upstream 组件必须携带官方源。
-          case "$PACKAGE_KIND" in
-            openssh-*) ;;
-            *) cmd+=("$URL") ;;
-          esac
-          "${cmd[@]}"
-      - name: 上传构建产物
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: built-${{ matrix.platform }}-${{ matrix.package }}
-          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
-          if-no-files-found: error
+      matrix:
+        # discover 输出字符串数组；strategy.matrix 必须是单维度 platform 的
+        # 对象形式（裸数组不是合法 matrix 定义）。
+        platform: ${{ fromJSON(needs.discover.outputs.platforms) }}
+    uses: ./.github/workflows/platform.yml
+    permissions:
+      contents: write
+    with:
+      platform: ${{ matrix.platform }}
+      force: ${{ inputs.force || false }}
+      version: ${{ inputs.version || '' }}
+      targets: ${{ inputs.targets || '' }}
+      skip_release: ${{ inputs.skip_release || false }}
+      dry_run: ${{ inputs.dry_run || false }}
 
-  test:
-    name: 安装验证 ${{ matrix.package }} (${{ matrix.platform }})
-    needs: [check, tests, build]
-    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
-    runs-on: ubuntu-latest
-    env:
-      PLATFORM: ${{ matrix.platform }}
-      PACKAGE: ${{ matrix.package }}
-      PYTHON: /usr/bin/python3
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 安装配置解析依赖（job 隔离，不依赖其他 job 的安装）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-yaml
-      - name: 下载本组合构建产物
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: built-${{ matrix.platform }}-${{ matrix.package }}
-          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
-      - name: 干净目标系统安装行为测试（SSH 五场景 / 组件 smoke）
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
-        run: bash scripts/package.sh test "$PLATFORM" "$PACKAGE"
-      - name: 留下安装成功凭据
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
-        run: |
-          mkdir -p verified
-          printf '%s/%s\n' "$PLATFORM" "$PACKAGE" > "verified/$PLATFORM-$PACKAGE"
-      - name: 上传安装验证凭据
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
-        with:
-          name: verified-${{ matrix.platform }}-${{ matrix.package }}
-          path: verified/
-          if-no-files-found: error
-
-  publish:
-    name: 发布 ${{ matrix.package }} (${{ matrix.platform }})
-    needs: [check, tests, build, test]
-    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success' && inputs.skip_release != true
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+  maintain-merged:
+    name: 清理已被全面替代的旧合并 Release（无凭据，不写基线）
+    needs: [discover, tests, platform]
+    if: >-
+      always() &&
+      needs.discover.result == 'success' &&
+      needs.tests.result == 'success' &&
+      inputs.skip_release != true
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      PLATFORM: ${{ matrix.platform }}
-      PACKAGE: ${{ matrix.package }}
-      VERSION: ${{ matrix.version }}
-      URL: ${{ matrix.url }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 安装发布依赖（publish_release 读取 rpm header 与校验清单）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-rpm python3-yaml
-      - name: 下载安装验证凭据（缺失说明本组合构建或验证失败，发布随即失败）
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: verified-${{ matrix.platform }}-${{ matrix.package }}
-          path: verified/
-      - name: 下载本组合构建产物
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: built-${{ matrix.platform }}-${{ matrix.package }}
-          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
-      - name: 幂等发布（校验资产完整后创建或重入，绝不在不一致时写凭据）
-        if: hashFiles(format('verified/{0}-{1}', matrix.platform, matrix.package)) != ''
-        run: |
-          /usr/bin/python3 scripts/publish_release.py --dir "dist/$PLATFORM/$PACKAGE" \
-            --platform "$PLATFORM" --package "$PACKAGE" --version "$VERSION" \
-            --repo "$GITHUB_REPOSITORY" --source-url "$URL" --output "$GITHUB_OUTPUT"
-      - name: 上传发布凭据（receipt + 构建 spec / DEB 元数据）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles(format('verified/{0}-{1}', matrix.platform, matrix.package)) != ''
-        with:
-          name: receipt-${{ matrix.platform }}-${{ matrix.package }}
-          path: published/
-          if-no-files-found: error
-
-  finalize:
-    name: 清理历史 Release 并回写成功基线
-    needs: [check, tests, build, test, publish]
-    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success' && inputs.skip_release != true
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      BRANCH: ${{ github.ref_name }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 合并全部组合的发布凭据
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: receipt-*
-          path: published
-          merge-multiple: true
       - name: 安装版本比较依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-rpm python3-yaml
-      - name: 集中串行清理历史 Release（先校验后删除，保留 Git tag）
+      - name: 集中维护旧合并 Release（先校验后删除，保留 Git tag）
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          receipts=(published/receipts/*.json)
-          [ "${#receipts[@]}" -gt 0 ] || { echo '无成功发布的组合，跳过清理与回写'; exit 0; }
           dry=""
           [ "$DRY_RUN" = true ] && dry="--dry-run"
-          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" $dry "${receipts[@]}"
-      - name: 回写成功基线（每轮取最新分支重放 receipt + 防降级，无 rebase 状态残留）
-        if: env.DRY_RUN != 'true'
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          receipts=(published/receipts/*.json)
-          [ "${#receipts[@]}" -gt 0 ] || exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          ok=0
-          for i in 1 2 3 4 5; do
-            # 每轮强制回到最新远端分支工作树：上一轮的本地 commit / 冲突残留全部
-            # 丢弃，绝不留下 rebase 进行中状态；凭据在最新基线上重放。
-            git fetch origin "$BRANCH" || { sleep 15; continue; }
-            git checkout -f -B "$BRANCH" "origin/$BRANCH" || { sleep 15; continue; }
-            # record 自带哈希校验与防降级：并发更新已写入的更高基线不会被覆盖。
-            /usr/bin/python3 scripts/record_versions.py version.json "${receipts[@]}" || { sleep 15; continue; }
-            if git diff --quiet -- version.json; then
-              echo "成功基线无变化（幂等，或并发更新已覆盖）"
-              ok=1
-              break
-            fi
-            git add version.json
-            git commit -m "build: record published baselines" || { sleep 15; continue; }
-            if git push origin "HEAD:$BRANCH"; then
-              ok=1
-              break
-            fi
-            echo "push 冲突，重试 $i/5"
-            sleep 15
-          done
-          [ "$ok" = 1 ] || { echo "回写重试耗尽（远端持续冲突）" >&2; exit 1; }
+          # 单一收口：只维护跨平台旧合并 v*（替代校验共用平台侧实现），不接
+          # 发布凭据、不删普通组合（各平台 finalize 已收口）、不回写基线。
+          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" \
+            --merged-only $dry
 
   scheduled-time:
     name: 记录最近一次成功调度时间
-    needs: [check, tests, build, test, publish, finalize]
+    needs: [discover, tests, platform, maintain-merged]
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.check.result == 'success' &&
+      needs.discover.result == 'success' &&
       needs.tests.result == 'success' &&
-      (needs.check.outputs.has_updates != 'true' ||
-       (needs.build.result == 'success' &&
-        needs.test.result == 'success' &&
-        needs.publish.result == 'success' &&
-        needs.finalize.result == 'success'))
+      needs.platform.result == 'success' &&
+      needs.maintain-merged.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

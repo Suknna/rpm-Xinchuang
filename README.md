@@ -88,16 +88,24 @@ python3 scripts/project_config.py target <platform> <package>
 
 [GitHub Actions](.github/workflows/rpm-xinchuang.yml) 每天北京时间 **09:17** 检查上游版本，
 发现更新后自动构建、测试并发布到 [Releases](https://github.com/Suknna/rpm-Xinchuang/releases)。
-已发布版本记录在 [`version.json`](version.json) 的 `platforms.<platform>.<package>` 中，失败的平台不会推进版本基线。
+流水线为父子结构：父工作流先本地发现启用平台（清单派生自各 `platform.yaml` 的启用组合，
+不硬编码平台）并运行一次共享本地测试（`tests/` 代码质量门控），再逐平台并行调用可复用的
+[platform.yml](.github/workflows/platform.yml)，每平台独立完成检测 → 构建 → 安装验证 →
+发布 → 清理回写；单个上游检测故障只失败所在平台，失败的平台不会推进版本基线。
+已发布版本记录在 [`version.json`](version.json) 的 `platforms.<platform>.<package>` 中。
 
 每个 (platform, package) 组合独立 Release，tag 为 `<platform>-<package>-<version>-<release>`，
 release 段取自实际构建产物（RPM 以 rpm header 为权威且文件名须一致，DEB 取 `build.json` 的
 原生修订串）；Release 资产严格限定包文件与 `SHA256SUMS`（RPM 集合锚定构建 spec 声明的
 二进制包），`build.spec` / `build.json` / `changelog` 只作为发布凭据工件保存、不对外公开。
-新建 Release 后必须远程逐字节校验通过才写凭据，创建成功不等于完整成功。全部凭据经本地预检
-后由 finalize 集中收口：先校验后清理同组合的其余 Release（保留 Git tag），最后只回写
-[`version.json`](version.json) 成功基线（源 spec 永不因发布改写）；一张坏凭据即中止，零删除、
-零回写。保留组合内版本最高的一套（RPM 用 rpm 规则、Ubuntu 用 dpkg 规则，绝不按创建时间），
+新建 Release 后必须远程逐字节校验通过才写凭据，创建成功不等于完整成功。全部凭据先经本地预检，
+再由各平台 finalize 批内收口（`prune_releases.py --platform --skip-merged` 清理 +
+`record_versions.py --platform` 回写）：先校验后清理本平台同组合的其余 Release（保留 Git tag），
+只回写 [`version.json`](version.json) 本平台成功基线（源 spec 永不因发布改写）；一张坏凭据
+即中止，零删除、零回写。跨平台旧合并 `v*` 不在平台批内处理——全平台结束后由父工作流单例
+维护（`prune_releases.py --merged-only`），只删已被全面替代的旧合并 Release，不接凭据、
+不回写，其失败不影响已完成的平台回写。保留组合内版本最高的一套（RPM 用 rpm 规则、Ubuntu
+用 dpkg 规则，绝不按创建时间），
 较低版本补发不替换高版本、不回退基线。历史上 OpenSSH EL7 / EL8 共用 `v<版本>-<修订号>`
 Release，按还原的平台修订串比较，仅在 EL7 与 EL8 都存在不低于它的完整且校验通过的新格式
 替代时才清理；凭据所指 Release 已被保留策略删除时，同组合存在更高且校验通过的替代按
@@ -118,7 +126,8 @@ CentOS 7 是独立构建路径，覆盖 OpenSSH、Bash、chrony、sudo、NTP、T
 
 - `version`：指定 OpenSSH 版本，统一 pin 所有 OpenSSH 平台（格式 X.YpZ）。
 - `targets`：仅构建指定组合，`pkg`、`pkg/平台`、`pkg@版本`、`pkg/平台@版本` 逗号分隔；
-  版本优先级为显式 pin > 已发布基线 > 上游最新。
+  版本优先级为显式 pin > 已发布基线 > 上游最新；只命中部分平台时，其余平台检测不到
+  更新、整条子链自动跳过（平台仍显示成功）。
 - `force`：强制重建其他已启用组件的当前上游最新版。
 - `skip_release`：仅构建验证，不发布、不清理、不回写。
 - `dry_run`：发布照常执行，清理只演练（列出将删除项）、不回写基线。

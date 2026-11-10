@@ -11,6 +11,8 @@ packaging/upstreams.yaml。宿主机用本模块解析后，通过 `docker -e`�
   get_target(platform, package, root=ROOT) -> 扁平 target dict
   load_upstreams(root=ROOT) -> {package: {name, anitya_id, version_pattern,
                                           source_url, enabled}}
+  platform_ids(targets)  -> 有启用 target 的平台 id 列表（CI discover 矩阵来源；
+                             CLI `platforms [--config-root ROOT]` 输出 JSON）
 target 字段：platform, package, kind（openssh-rpm / upstream-rpm / openssh-deb 三种之一；
 可显式声明或缺省按包名派生，声明必须与 family 及包名角色一致。不支持其余组合：
 构建链按字面包名 openssh 分发，别名包不受支持）, family, el, repos, image,
@@ -246,6 +248,14 @@ def iter_targets(config):
                 yield _build_target(platforms[platform], platform, package, root)
 
 
+def platform_ids(targets):
+    """从 iter_targets 的启用 target 流派生平台 id 列表（而非枚举平台目录）。
+
+    平台清单只看有启用组合的平台：CI discover 的唯一来源，新增平台零代码进入。
+    """
+    return sorted({target["platform"] for target in targets})
+
+
 def get_target(platform, package, root=ROOT):
     """解析一个构建目标；未知目标、越界或缺失文件都视为配置错误。"""
     platforms = load_config(root)["platforms"]
@@ -351,6 +361,9 @@ def main(argv=None):
         cmd = sub.add_parser(name, help=help_text)
         cmd.add_argument("platform")
         cmd.add_argument("package")
+    cmd_platforms = sub.add_parser(
+        "platforms", help="print a JSON list of platform ids that have enabled targets")
+    cmd_platforms.add_argument("--config-root", default=".")
     cmd_image = sub.add_parser("image", help="print the pinned container image for a platform")
     cmd_image.add_argument("platform")
     args = parser.parse_args(argv)
@@ -360,6 +373,8 @@ def main(argv=None):
         elif args.command == "shell":
             for name, value in target_env(get_target(args.platform, args.package)).items():
                 print(f"{name}={shlex.quote(value)}")
+        elif args.command == "platforms":
+            print(json.dumps(platform_ids(iter_targets(load_config(args.config_root)))))
         else:
             config = load_config()
             if args.platform not in config["platforms"]:

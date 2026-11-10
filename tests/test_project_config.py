@@ -493,6 +493,51 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), IMAGES["centos7"])
 
+    def test_platforms_prints_json_enabled_platform_list(self):
+        # CI discover 的平台矩阵唯一来源：有启用 target 的平台，JSON 列表。
+        result = self.run_cli("platforms")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         ["centos7", "el7", "el8", "ubuntu2204"])
+
+    def test_platforms_honors_config_root_and_new_platforms(self):
+        # fixture 仓库零代码新增平台：平台矩阵随配置自动扩展，无需改 workflow。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "packaging").mkdir(parents=True)
+        (root / "packaging" / "upstreams.yaml").write_text(UPSTREAMS_YAML, encoding="utf-8")
+        for platform in ("demo", "ci9"):
+            (root / "platforms" / platform).mkdir(parents=True)
+            (root / "platforms" / platform / "platform.yaml").write_text(
+                f"image: registry.example.com/img@sha256:{'a' * 64}\n"
+                "family: rpm\n"
+                f"el: {platform}\n"
+                "packages:\n"
+                "  demo:\n"
+                f"    spec: platforms/{platform}/packages/demo/demo.spec\n",
+                encoding="utf-8")
+            spec = root / "platforms" / platform / "packages" / "demo" / "demo.spec"
+            spec.parent.mkdir(parents=True)
+            spec.write_text("Name: demo\n", encoding="utf-8")
+        result = self.run_cli("platforms", "--config-root", str(root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["ci9", "demo"])
+
+    def test_platforms_rejects_broken_config(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "packaging").mkdir(parents=True)
+        (root / "packaging" / "upstreams.yaml").write_text(UPSTREAMS_YAML, encoding="utf-8")
+        (root / "platforms" / "demo").mkdir(parents=True)
+        (root / "platforms" / "demo" / "platform.yaml").write_text(
+            "image: registry.example.com/img:latest\nfamily: rpm\nel: el7\n"
+            "packages: {demo: {spec: x}}\n", encoding="utf-8")
+        result = self.run_cli("platforms", "--config-root", str(root))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("digest-pinned", result.stderr)
+
     def test_invalid_target_exits_nonzero_with_message(self):
         result = self.run_cli("target", "el7", "nope")
         self.assertEqual(result.returncode, 2)

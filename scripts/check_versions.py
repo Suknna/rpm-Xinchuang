@@ -4,6 +4,10 @@
 上游注册与目标组合唯一来自 scripts/project_config.py（platforms/<id>/platform.yaml
 与 packaging/upstreams.yaml），不再维护内置 PROJECTS 表。输出一个统一的矩阵
 （字段为 platform 而非旧的 el），OpenSSH 的全部平台与组件一起进入矩阵。
+
+父 workflow（rpm-xinchuang.yml）先经 discover() 本地发现启用平台并预检全局输入
+（全程无网络）；可复用平台流水线（platform.yml）按平台调用本 CLI 并传
+--platform：先本地 scope 再网络 fetch，单个上游故障只失败所在平台。
 """
 
 import argparse
@@ -150,6 +154,26 @@ def registries(config_root):
     return targets, upstreams
 
 
+def validate_mutex(targets, force, openssh_version):
+    """CLI 与 discover 共用的全局输入互斥；语义与检测入口保持同一份。"""
+    if targets and (force or openssh_version):
+        raise ValueError("--targets cannot be combined with --force or --openssh-version")
+
+
+def discover(config_root=".", targets="", force=False, openssh_version=""):
+    """父 workflow discover：全程无网络的本地配置发现。
+
+    返回有启用 target 的平台 id 列表（iter_targets 派生，而非枚举平台目录）；
+    global targets 复用 parse_selection 预检——语法错误与未知组合都是真错误，
+    互斥规则与检测 CLI 同源。任何上游网络故障都不影响 discover。
+    """
+    targets_list, _ = registries(config_root)
+    validate_mutex(targets, force, openssh_version)
+    if targets:
+        parse_selection(targets, targets_list)
+    return project_config.platform_ids(targets_list)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version-file", default="version.json")
@@ -161,20 +185,37 @@ def main(argv=None):
                         help="manual selection: pkg, pkg/platform, pkg@ver, pkg/platform@ver")
     parser.add_argument("--openssh-version", default=os.environ.get("FORCE_VERSION", ""),
                         help="build a pinned OpenSSH version on all OpenSSH platforms")
+    parser.add_argument("--platform", default="",
+                        help="scope detection to one platform; the scope is applied "
+                             "locally before any network fetch")
     args = parser.parse_args(argv)
-    if args.targets and (args.force or args.openssh_version):
-        parser.error("--targets cannot be combined with --force or --openssh-version")
     try:
-        targets, upstreams = registries(args.config_root)
+        validate_mutex(args.targets, args.force, args.openssh_version)
+        global_targets, upstreams = registries(args.config_root)
+        # 先本地 --platform scope 再网络 fetch：单个上游故障只失败所在平台，
+        # 绝不拖垮其他平台的独立检测链。
+        targets = global_targets
+        if args.platform:
+            targets = [t for t in global_targets if t["platform"] == args.platform]
+            if not targets:
+                raise ValueError("unknown platform %r (have: %s)" % (
+                    args.platform,
+                    ", ".join(sorted({t["platform"] for t in global_targets}))))
         state = load_state(args.version_file)
 
         def get_versions(package):
             return latest(package, upstreams[package])
 
-        selection = parse_selection(args.targets, targets) if args.targets else None
+        # selection 先按全局 targets 校验（语法/未知组合是真错误），再按平台
+        # 过滤：只选了其他平台的组合时本平台得到空矩阵，正常 skip 不报错。
+        selection = parse_selection(args.targets, global_targets) if args.targets else None
+        if selection is not None and args.platform:
+            selection = [item for item in selection if item["platform"] == args.platform]
         matrix = detect(state, targets, upstreams, get_versions, force=args.force,
                         selection=selection, openssh_version=args.openssh_version)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # 网络故障（URLError 等）与配置/数据错误一样：干净报错、非零退出，
+        # 平台 job 失败但不拖垮其他平台。
         parser.exit(2, "error: %s\n" % exc)
     print("Matrix updates:",
           ", ".join(row["package"] + "/" + row["platform"] for row in matrix) or "none")

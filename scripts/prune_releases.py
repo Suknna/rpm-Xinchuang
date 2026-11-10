@@ -17,6 +17,11 @@
   仅当两个平台都存在不低于它（按还原后的 R.<platform> 比较）的完整且校验通过
   的新格式发布才删除，平台未配置/被禁用绝不删除。
 * 按不可变 Release ID 删除，Git tag 一律保留。
+* 平台独立发布：--platform 严格限定凭据平台（artifact 下载 pattern 误带入的
+  其他平台凭据，含 el7/el7x 这类前缀相似平台，在任何远程调用前拒绝）；
+  --skip-merged 供平台 finalize 普通清理跳过跨平台 merged v*；--merged-only
+  供父维护只处理 merged v*（不接 receipt、不删普通组合，双平台完整替代
+  门槛与真实校验保持不变）。
 """
 
 import argparse
@@ -239,14 +244,61 @@ def _newest(indexed, combo, fmt=None):
     return best
 
 
+def _plan_merged(repo, merged, indexed, combos, verified):
+    """合并 Release 保留计划：双平台都有更高且完整校验通过的新格式替代才可删。
+
+    verified 跨阶段复用已验证的替代 Release，避免重复远程校验；普通清理与
+    --merged-only 父维护共用同一实现，安全验证绝不复制。
+    """
+    deletable_merged = []
+    for release, key in merged:
+        for platform in MERGED_PLATFORMS:
+            # 比较按旧约定还原的 R.<platform>：2.el7~rc1 不满足 >= 2.el7。
+            effective = ReleaseKey("all", "openssh", key.version,
+                                   key.release + "." + platform, "legacy_merged", "rpm")
+            replacement = _newest(indexed, (platform, "openssh"), fmt="new")
+            if replacement is None or newer_release(effective, replacement[1]):
+                break
+            if replacement[0]["id"] not in verified:
+                verify_release(repo, replacement[0], replacement[1])
+                verified.add(replacement[0]["id"])
+        else:
+            deletable_merged.append(release)
+            continue
+        print("Keep Release " + release["tag_name"] + " (merged fallback)")
+    return deletable_merged
+
+
 def prune(repo, receipts, platforms, upstreams, combos, families,
-          dry_run=False, get_target=None):
+          dry_run=False, get_target=None, platform=None,
+          skip_merged=False, merged_only=False):
     packages = set(upstreams)
-    # 阶段零：本地全量预检 receipt（身份 + 哈希 + 构建产物一致性）；一张坏凭据
-    # 即中止，绝不发起任何远程校验或删除。
+    if merged_only:
+        # 父维护模式：全部平台结束后单例运行，只维护跨平台 merged v*；
+        # 普通组合已由各平台 finalize 清理完毕，这里绝不触碰，也不需要 receipt。
+        if receipts:
+            raise ValueError("--merged-only 维护不接 receipt")
+        if skip_merged:
+            raise ValueError("--merged-only 与 --skip-merged 互相冲突")
+        if platform is not None:
+            raise ValueError("--merged-only 天然跨平台，不支持 --platform")
+        indexed, merged = _collect(repo, platforms, packages, families)
+        if tuple(p for p in MERGED_PLATFORMS if (p, "openssh") in combos) == MERGED_PLATFORMS:
+            deletable_merged = _plan_merged(repo, merged, indexed, combos, set())
+            for release in deletable_merged:
+                _delete(repo, release, dry_run)
+        return
+    if platform is not None and platform not in platforms:
+        raise ValueError("unknown platform scope: " + platform)
+    # 阶段零：本地全量预检 receipt（身份 + 哈希 + 构建产物一致性）；平台 scope
+    # 用精确字段比较把关（el7 与 el7x 这类前缀相似平台绝不混淆），连同一张
+    # 坏凭据都在任何远程校验或删除之前拒绝。
     rows = []
     for receipt in receipts:
         row = record_versions.read_receipt(receipt, get_target=get_target)
+        if platform is not None and row["platform"] != platform:
+            raise ValueError("receipt platform %r is outside platform scope %r: %s"
+                             % (row["platform"], platform, receipt))
         if (row["platform"], row["package"]) not in combos:
             raise ValueError("receipt target is not configured: %s/%s"
                              % (row["platform"], row["package"]))
@@ -291,23 +343,12 @@ def prune(repo, receipts, platforms, upstreams, combos, families,
         verified.add(keeper["id"])
         keepers[combo] = (keeper, kkey)
         print("Keep Release " + keeper["tag_name"] + " (%s/%s)" % combo)
+    # 合并 Release 维护：平台普通清理（--skip-merged）绝不触碰跨平台 v*，
+    # 也不为他平台替代做完整性校验；双平台组合未全部启用时保持旧回退行为。
     deletable_merged = []
-    if tuple(p for p in MERGED_PLATFORMS if (p, "openssh") in combos) == MERGED_PLATFORMS:
-        for release, key in merged:
-            for platform in MERGED_PLATFORMS:
-                # 比较按旧约定还原的 R.<platform>：2.el7~rc1 不满足 >= 2.el7。
-                effective = ReleaseKey("all", "openssh", key.version,
-                                       key.release + "." + platform, "legacy_merged", "rpm")
-                replacement = _newest(indexed, (platform, "openssh"), fmt="new")
-                if replacement is None or newer_release(effective, replacement[1]):
-                    break
-                if replacement[0]["id"] not in verified:
-                    verify_release(repo, replacement[0], replacement[1])
-                    verified.add(replacement[0]["id"])
-            else:
-                deletable_merged.append(release)
-                continue
-            print("Keep Release " + release["tag_name"] + " (merged fallback)")
+    if not skip_merged and tuple(
+            p for p in MERGED_PLATFORMS if (p, "openssh") in combos) == MERGED_PLATFORMS:
+        deletable_merged = _plan_merged(repo, merged, indexed, combos, verified)
     # 阶段二：删除同组合非保留项与已满足双平台替代条件的合并 Release。
     for combo, (keeper, _) in keepers.items():
         for release, _ in indexed[combo]:
@@ -328,13 +369,30 @@ def _delete(repo, release, dry_run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--platform",
+                        help="限定凭据平台；其他平台（含前缀相似）的凭据在任何远程"
+                             "调用前拒绝")
     parser.add_argument("--dry-run", action="store_true",
                         help="verify and show the cleanup without deleting")
-    parser.add_argument("receipts", nargs="+",
+    parser.add_argument("--skip-merged", action="store_true",
+                        help="平台普通清理：不触碰跨平台 merged v* Release")
+    parser.add_argument("--merged-only", action="store_true",
+                        help="父维护：只处理跨平台 merged v*，不接 receipt、不删普通组合")
+    parser.add_argument("receipts", nargs="*",
                         help="published receipt JSON files from this run")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
         parser.error("invalid repository: " + args.repo)
+    if args.merged_only:
+        if args.receipts:
+            parser.error("--merged-only does not take receipts")
+        if args.skip_merged:
+            parser.error("--merged-only conflicts with --skip-merged")
+        if args.platform:
+            parser.error("--merged-only is inherently cross-platform; "
+                         "--platform does not apply")
+    elif not args.receipts:
+        parser.error("receipts are required unless --merged-only")
     try:
         config = project_config.load_config()
         upstreams = {package: upstream for package, upstream
@@ -343,7 +401,9 @@ def main(argv=None):
         families = {pid: cfg["family"] for pid, cfg in config["platforms"].items()}
         combos = {(target["platform"], target["package"])
                   for target in project_config.iter_targets(config)}
-        prune(args.repo, args.receipts, platforms, upstreams, combos, families, args.dry_run)
+        prune(args.repo, args.receipts, platforms, upstreams, combos, families,
+              args.dry_run, platform=args.platform, skip_merged=args.skip_merged,
+              merged_only=args.merged_only)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, rpm.error) as exc:
         print("ERROR: " + str(exc), file=sys.stderr)
         return 1

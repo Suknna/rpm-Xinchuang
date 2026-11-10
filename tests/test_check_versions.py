@@ -1,5 +1,7 @@
 """Per-(platform, package) update detection, selection and version.json schema."""
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -89,7 +91,7 @@ def make_config(root, platforms=("el7", "el8")):
         family = "deb" if platform == "ubuntu2204" else "rpm"
         packages = ("openssh",) if family == "deb" else ("openssh", "chrony", "sudo")
         write_platform(root, platform, family, packages=packages)
-        for directory in ("packaging/%s/packages/openssh/debian" % platform,):
+        for directory in ("platforms/%s/packages/openssh/debian" % platform,):
             (root / directory).mkdir(parents=True, exist_ok=True)
         for package in packages:
             if family == "rpm":
@@ -114,6 +116,17 @@ def row(platform, package, version):
             "url": upstream.format(version=version)}
 
 
+def baseline_state(**overrides):
+    # fixture 基线对齐 fixture 上游最新版（openssh 10.6p2 / chrony 4.10 /
+    # sudo 1.9.17p2），默认无更新；overrides 按平台合并而非整体替换。
+    state = json.loads(json.dumps(MIGRATED))
+    for platform, packages in state["platforms"].items():
+        packages.update({"chrony": "4.10", "sudo": "1.9.17p2"})
+    for platform, packages in overrides.items():
+        state["platforms"].setdefault(platform, {}).update(packages)
+    return state
+
+
 class VersionDetectionTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -122,28 +135,18 @@ class VersionDetectionTest(unittest.TestCase):
         make_config(self.root)
         self.targets, self.upstreams = registries(self.root)
 
-    def state(self, **overrides):
-        # fixture 基线对齐 fixture 上游最新版（openssh 10.6p2 / chrony 4.10 /
-        # sudo 1.9.17p2），默认无更新；overrides 按平台合并而非整体替换。
-        state = json.loads(json.dumps(MIGRATED))
-        for platform, packages in state["platforms"].items():
-            packages.update({"chrony": "4.10", "sudo": "1.9.17p2"})
-        for platform, packages in overrides.items():
-            state["platforms"].setdefault(platform, {}).update(packages)
-        return state
-
     def get_versions(self, package):
         return list(VERSIONS[package])
 
     def test_lagging_platforms_update_independently(self):
         # OpenSSH 基线已按平台独立：仅落后的 el7 构建，el8/centos7 不动。
-        state = self.state(el7={"openssh": "10.5p1"})
+        state = baseline_state(el7={"openssh": "10.5p1"})
         matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
                                             self.get_versions)
         self.assertEqual(matrix, [row("el7", "openssh", "10.6p2")])
 
     def test_missing_baseline_bootstraps_only_the_new_target(self):
-        state = self.state()
+        state = baseline_state()
         del state["platforms"]["el8"]
         matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
                                             self.get_versions)
@@ -152,14 +155,14 @@ class VersionDetectionTest(unittest.TestCase):
                                   row("el8", "sudo", "1.9.17p2")])
 
     def test_force_rebuilds_components_but_not_openssh(self):
-        state = self.state()
+        state = baseline_state()
         matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
                                             self.get_versions, force=True)
         self.assertEqual({item["package"] for item in matrix}, {"chrony", "sudo"})
         self.assertEqual(len(matrix), 4)
 
     def test_selection_version_precedence_pin_over_baseline_over_latest(self):
-        state = self.state()
+        state = baseline_state()
         selected = check_versions.parse_selection(
             "chrony@4.8, chrony/el8, sudo", self.targets)
         matrix = check_versions.selection_rows(state, selected, self.upstreams,
@@ -170,7 +173,7 @@ class VersionDetectionTest(unittest.TestCase):
         ][:0] or matrix)
 
     def test_selection_entries_and_precedence(self):
-        state = self.state()
+        state = baseline_state()
         selected = check_versions.parse_selection(
             "chrony@4.8, chrony/el8, sudo", self.targets)
         matrix = check_versions.selection_rows(state, selected, self.upstreams,
@@ -185,7 +188,7 @@ class VersionDetectionTest(unittest.TestCase):
                 check_versions.parse_selection(invalid, self.targets)
 
     def test_openssh_pin_replaces_detected_rows_and_validates_format(self):
-        state = self.state(el7={"openssh": "10.5p1"})
+        state = baseline_state(el7={"openssh": "10.5p1"})
         matrix = check_versions.detect(state, self.targets, self.upstreams,
                                        self.get_versions, openssh_version="10.7p1")
         self.assertEqual([item for item in matrix if item["package"] == "openssh"],
@@ -201,7 +204,7 @@ class VersionDetectionTest(unittest.TestCase):
 
     def test_cli_writes_matrix_and_has_updates_only(self):
         version_file = self.root / "version.json"
-        version_file.write_text(json.dumps(self.state(el7={"openssh": "10.5p1"})))
+        version_file.write_text(json.dumps(baseline_state(el7={"openssh": "10.5p1"})))
         output = self.root / "output"
         args = ["--version-file", str(version_file), "--config-root", str(self.root),
                 "--output", str(output)]
@@ -229,6 +232,150 @@ class VersionDetectionTest(unittest.TestCase):
         state = check_versions.load_state(ROOT / "version.json")
         self.assertEqual(check_versions.baseline(state, "el7", "openssh"), "10.6p2")
         self.assertIsNone(check_versions.baseline(state, "el9", "openssh"))
+
+
+class PlatformScopeTest(unittest.TestCase):
+    """--platform 平台隔离：scope 在 fetch 之前，故障与手动选择都不跨平台泄漏。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        make_config(self.root, platforms=("el7", "el8", "ubuntu2204"))
+        self.fetched = []
+
+    def record_fetch(self, package, upstream, fetch=None):
+        # 记录真实发生网络 fetch 的上游包，用于断言「scope 在 fetch 之前」。
+        self.fetched.append(package)
+        return list(VERSIONS[package])
+
+    def broken_chrony_fetch(self, package, upstream, fetch=None):
+        self.fetched.append(package)
+        if package == "chrony":
+            raise OSError("upstream registry down for chrony")
+        return list(VERSIONS[package])
+
+    def run_main(self, *extra, state=None, fetcher=None):
+        version_file = self.root / "version.json"
+        version_file.write_text(json.dumps(state or baseline_state()))
+        output = self.root / "output"
+        with mock.patch.object(check_versions, "latest",
+                               lambda package, upstream, fetch=None:
+                                   (fetcher or self.record_fetch)(package, upstream, fetch)):
+            check_versions.main(["--version-file", str(version_file),
+                                 "--config-root", str(self.root),
+                                 "--output", str(output), *extra])
+        return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def run_main_expect_error(self, *extra):
+        version_file = self.root / "version.json"
+        version_file.write_text(json.dumps(baseline_state()))
+        stderr = io.StringIO()
+        with mock.patch.object(check_versions, "latest", self.broken_chrony_fetch), \
+                contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                check_versions.main(["--version-file", str(version_file),
+                                     "--config-root", str(self.root), *extra])
+        self.assertEqual(ctx.exception.code, 2)
+        return stderr.getvalue()
+
+    def test_ubuntu_check_only_fetches_openssh_and_survives_broken_chrony(self):
+        # 平台失败隔离：Ubuntu 只有 openssh，绝不触碰其他平台坏掉的 chrony。
+        values = self.run_main("--platform", "ubuntu2204",
+                               fetcher=self.broken_chrony_fetch)
+        self.assertEqual(self.fetched, ["openssh"])
+        self.assertEqual(values["has_updates"], "false")
+
+    def test_platform_check_hits_the_broken_upstream_and_fails_alone(self):
+        # 同一坏上游只击落 scoping 到它的平台；el8/ubuntu 的链路不受影响由上一
+        # 用例与矩阵隔离性共同保证。
+        stderr = self.run_main_expect_error("--platform", "el7")
+        self.assertIn("chrony", self.fetched)
+        self.assertIn("upstream registry down for chrony", stderr)
+
+    def test_stale_packages_update_independently_single_and_multi(self):
+        # 单包：仅 el7 chrony 落后；多包：openssh+chrony 同时落后。
+        values = self.run_main("--platform", "el7",
+                               state=baseline_state(el7={"chrony": "4.9"}))
+        self.assertEqual(json.loads(values["matrix"])["include"],
+                         [row("el7", "chrony", "4.10")])
+        values = self.run_main("--platform", "el7",
+                               state=baseline_state(el7={"chrony": "4.9",
+                                                         "openssh": "10.5p1"}))
+        self.assertEqual(json.loads(values["matrix"])["include"],
+                         [row("el7", "chrony", "4.10"), row("el7", "openssh", "10.6p2")])
+
+    def test_manual_selection_for_another_platform_yields_empty_matrix(self):
+        # 全局校验通过（chrony/el8 是合法组合），el7 平台过滤后无命中：空矩阵
+        # 正常 skip，且不发任何网络 fetch。
+        values = self.run_main("--platform", "el7", "--targets", "chrony/el8")
+        self.assertEqual(values["has_updates"], "false")
+        self.assertEqual(json.loads(values["matrix"])["include"], [])
+        self.assertEqual(self.fetched, [])
+
+    def test_force_scopes_to_the_selected_platform(self):
+        # force 只重建所在平台的组件，其他平台不泄漏。
+        values = self.run_main("--platform", "el7", "--force")
+        rows = json.loads(values["matrix"])["include"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({item["platform"] for item in rows}, {"el7"})
+        self.assertEqual({item["package"] for item in rows}, {"chrony", "sudo"})
+
+    def test_openssh_pin_scopes_to_the_selected_platform(self):
+        # 版本 pin 只落在 scoping 平台的 openssh；坏 chrony 不被触碰证明无跨平台 fetch。
+        values = self.run_main("--platform", "ubuntu2204", "--openssh-version", "10.7p1",
+                               fetcher=self.broken_chrony_fetch)
+        self.assertEqual(json.loads(values["matrix"])["include"],
+                         [row("ubuntu2204", "openssh", "10.7p1")])
+
+    def test_unknown_platform_is_a_real_error(self):
+        stderr = self.run_main_expect_error("--platform", "nope")
+        self.assertIn("unknown platform", stderr)
+
+    def test_targets_force_mutex_is_still_enforced(self):
+        stderr = self.run_main_expect_error("--targets", "chrony", "--force")
+        self.assertIn("--targets cannot be combined", stderr)
+
+
+class DiscoverTest(unittest.TestCase):
+    """discover()：父编排的本地无网络平台发现与全局输入预检。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        make_config(self.root, platforms=("el7", "el8", "ubuntu2204"))
+
+    def test_platforms_come_from_enabled_targets_without_network(self):
+        with mock.patch.object(check_versions, "latest",
+                               side_effect=AssertionError("discover 必须无网络")):
+            platforms = check_versions.discover(str(self.root))
+        self.assertEqual(platforms, ["el7", "el8", "ubuntu2204"])
+
+    def test_new_platform_enters_the_list_without_workflow_changes(self):
+        fresh = tempfile.TemporaryDirectory()
+        self.addCleanup(fresh.cleanup)
+        root = Path(fresh.name)
+        make_config(root, platforms=("el7", "el8", "ubuntu2204", "ci9"))
+        with mock.patch.object(check_versions, "latest",
+                               side_effect=AssertionError("discover 必须无网络")):
+            platforms = check_versions.discover(str(root))
+        self.assertEqual(platforms, ["ci9", "el7", "el8", "ubuntu2204"])
+
+    def test_targets_syntax_and_unknown_entries_are_real_errors(self):
+        for bad in ("chrony/el7/extra", "ntp", "@4.9"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                check_versions.discover(str(self.root), targets=bad)
+        # 合法选择（平台限定 + 版本 pin）通过且不影响平台清单。
+        self.assertEqual(check_versions.discover(str(self.root), targets="chrony/el8@4.9"),
+                         ["el7", "el8", "ubuntu2204"])
+
+    def test_mutex_is_validated_locally(self):
+        for kwargs in ({"targets": "chrony", "force": True},
+                       {"targets": "chrony", "openssh_version": "10.7p1"}):
+            with self.subTest(**kwargs):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                    check_versions.discover(str(self.root), **kwargs)
 
 
 if __name__ == "__main__":
