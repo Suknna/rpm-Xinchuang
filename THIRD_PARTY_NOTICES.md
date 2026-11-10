@@ -10,11 +10,11 @@
 - NTP 使用 CentOS 7 的打包规则，并维护 EL7 / EL8 适配。
 - Bash、Telnet 使用本项目维护的 spec，默认配置或服务文件来自相应发行版；Telnet 的
   软件上游为 GNU inetutils，不再使用发行版原有的 netkit-telnet 源码。
-- OpenSSH 使用项目维护的专用 spec，复用 OpenSSH portable 随附的 Red Hat 服务模板，
-  并维护适用于 EL7 / EL8 的 PAM 配置。
+- OpenSSH 使用项目维护的共享 spec（[`packaging/common/openssh/`](packaging/common/openssh/)），
+  复用 OpenSSH portable 随附的 Red Hat 服务模板，并维护适用于 EL7 / EL8 的 PAM 配置。
 - Ubuntu 22.04 的 OpenSSH 使用项目维护的 debhelper 规则；PAM、SSH 默认配置和
   `ssh.service` 按 Ubuntu jammy 的 OpenSSH 包约定适配。软件包内附上游 `LICENCE`，
-  以及 [Debian 打包文件的 BSD-2-clause 声明](packaging/openssh/ubuntu2204/packaging-copyright)。
+  以及 [Debian 打包文件的 BSD-2-clause 声明](platforms/ubuntu2204/packages/openssh/debian/packaging-copyright)。
   Ubuntu/Debian 打包约定来源为 Ubuntu `openssh` 源包（https://launchpad.net/ubuntu/+source/openssh）。
 
 ## 软件与依赖
@@ -35,8 +35,8 @@
 | zlib（静态链接依赖） | zlib License |
 
 仓库内也包含保留独立许可证的辅助文件，例如
-[`ntp.dhclient`](source-assets/ntp/el7/ntp.dhclient) 使用 GPLv2 或更新版本，
-[`ntp2chrony.py`](source-assets/chrony/el8/ntp2chrony.py) 保留 Miroslav Lichvar 的 MIT 声明。
+[`ntp.dhclient`](platforms/el7/packages/ntp/assets/ntp.dhclient) 使用 GPLv2 或更新版本，
+[`ntp2chrony.py`](platforms/el8/packages/chrony/assets/ntp2chrony.py) 保留 Miroslav Lichvar 的 MIT 声明。
 
 再分发源码或 RPM 时，应保留对应的版权、许可证及必要声明，并按相关许可证履行
 源码提供等义务。打包脚本采用 MIT 不会免除所分发软件及其依赖的许可要求。

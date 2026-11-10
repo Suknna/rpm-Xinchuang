@@ -1,0 +1,43 @@
+# 共享上游注册表：release-monitoring.org (Anitya) 项目身份与版本规则。
+#
+# name 是 Anitya 查询名，anitya_id 是固定项目 ID——Anitya 存在与 sudo/ntp 同名的
+# 无关项目，必须按 ID 匹配，不能按名字。version_pattern 是合法 stable 版本的
+# 正则，source_url 是源码包下载模板（必须含 {version} 占位符）。
+# enabled: false 表示该上游暂停检测与构建（同名包在 platform.yaml 中也须停用）。
+projects:
+  openssh:
+    name: OpenSSH
+    anitya_id: 2565
+    version_pattern: '\d+\.\d+p\d+'
+    source_url: https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-{version}.tar.gz
+  chrony:
+    name: chrony
+    anitya_id: 8810
+    version_pattern: '\d+(?:\.\d+)+'
+    source_url: https://chrony-project.org/releases/chrony-{version}.tar.gz
+  vim:
+    enabled: false   # Temporarily paused: excluded from scheduled, forced and retry builds.
+    name: vim
+    anitya_id: 5092
+    version_pattern: '\d+(?:\.\d+)+'
+    source_url: https://github.com/vim/vim/archive/refs/tags/v{version}.tar.gz
+  bash:
+    name: bash
+    anitya_id: 166
+    version_pattern: '\d+(?:\.\d+)+'
+    source_url: https://ftp.gnu.org/gnu/bash/bash-{version}.tar.gz
+  sudo:
+    name: sudo
+    anitya_id: 4906
+    version_pattern: '\d+(?:\.\d+)+p\d+'
+    source_url: https://www.sudo.ws/dist/sudo-{version}.tar.gz
+  ntp:
+    name: ntp
+    anitya_id: 9025
+    version_pattern: '\d+(?:\.\d+)+p\d+'
+    source_url: https://downloads.nwtime.org/ntp/ntp-{version}.tar.gz
+  telnet:
+    name: inetutils
+    anitya_id: 13805
+    version_pattern: '\d+(?:\.\d+)+'
+    source_url: https://ftp.gnu.org/gnu/inetutils/inetutils-{version}.tar.gz

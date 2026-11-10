@@ -1,22 +1,36 @@
-# rpm-Xinchuang：EL7/EL8/CentOS 7 RPM，以及 Ubuntu 22.04 OpenSSH DEB
+# rpm-Xinchuang：平台优先目录 + 统一 (platform, package) 矩阵的 RPM/DEB 构建发布流水线
 #
 # 触发：
-#   * schedule：北京时间每天 09:17（UTC 01:17）检测 OpenSSH portable 更新，
-#     同时通过 Anitya 检测其他已启用组件的官方最新上游版本；
-#   * workflow_dispatch：受控手动运行（可强制指定版本 / 仅构建不发布）。
+#   * schedule：北京时间每天 09:17（UTC 01:17）通过 Anitya 检测全部启用上游版本；
+#   * workflow_dispatch：受控手动运行（强制版本 / 指定组合 / 仅构建 / 清理演练）。
 #
 # 安全边界：
 #   * 无 pull_request 触发——外部 PR 永远不会拿到本仓库的任何 token；
-#   * 默认仅 contents:read，仅发布、版本回写和 time 记录 job 需要 contents:write；
+#   * 默认仅 contents:read，仅 publish / finalize 两个 job 需要 contents:write；
 #   * GITHUB_TOKEN 仅对本仓库有效；
-#   * 所有第三方 action 固定到 commit SHA；基础镜像在 scripts/platforms.sh 固定 digest。
+#   * 所有第三方 action 固定到 commit SHA；基础镜像在 platforms/<id>/platform.yaml
+#     以 digest 固定。
 #
-# 幂等与并发：
-#   * concurrency 排队执行（不取消进行中的运行）；
-#   * Release 按 tag 存在性 + 全部资产哈希校验后决定是否重入（不完整即失败，
-#     绝不在资产不完整时回写版本）；
-#   * 版本成功发布才回写；所有分支成功后写根目录 time（无更新也会提交）。
-#   * 同组件/平台只保留 RPM 版本号最高的 Release；清理成功后才回写保留版本。
+# 调度契约（构建/验证统一入口 scripts/package.sh，配置唯一来源 scripts/project_config.py）：
+#   * check 输出统一矩阵 {platform, package, version, url}，OpenSSH 所有平台与
+#     组件一起进入矩阵，没有旧专用 build/test/release job；本地行为测试（tests）
+#     是发布链的一等门禁：build → test → publish → finalize 全部 needs tests，
+#     并在 always() 条件里显式要求 tests 成功；
+#   * build → test → publish 三段按 built-<platform>-<package> /
+#     verified-<platform>-<package> / receipt-<platform>-<package> 工件精确关联，
+#     fail-fast:false，单个组合失败绝不阻断其他已验证组合发布；
+#   * 每个宿主 job 独立安装自身依赖（python3-yaml / python3-rpm），宿主 Python
+#     统一显式 /usr/bin/python3；
+#   * publish 每组合幂等发布独立 Release（tag <platform>-<package>-<version>-<release>，
+#     资产只有包文件 + SHA256SUMS；创建成功后仍需远程逐字节校验通过才写凭据），
+#     并上传 published/ 凭据工件；
+#   * finalize 单进程串行收口：receipt 全量预检 → 先校验后清理历史 Release
+#     （保留 Git tag）→ 回写 version.json 成功基线（唯一回写对象，永不改写源
+#     spec）。校验失败不删除、不回写；dry_run 只演练清理；skip_release 跳过
+#     publish/finalize 全部写操作。
+#   * 并发安全：concurrency 串行排队；finalize 回写每轮强制回到最新远端分支、
+#     重放 receipt（record 自带防降级）再提交推送——不使用 rebase，冲突残留
+#     不会累积，并发更新的更高基线不会被覆盖。
 name: rpm-Xinchuang
 
 on:
@@ -33,19 +47,19 @@ on:
         description: '强制构建的 OpenSSH 版本（格式 X.YpZ，留空=自动检测）'
         required: false
         default: ''
-      skip_release:
-        description: '仅构建验证，不发布 Release、不回写版本'
-        required: false
-        type: boolean
-        default: false
-      repair_pam:
-        description: '只重建并验证 OpenSSH RPM 平台与 sudo EL8 的 PAM 修复'
-        type: boolean
-        default: false
-      retry_component:
-        description: '仅补发已启用组件/版本的 EL7+EL8+CentOS 7（例 chrony:4.9）'
+      targets:
+        description: '仅构建指定组合（chrony、chrony/el8、chrony@4.9、chrony/el8@4.9，逗号分隔；缺省版本用已发布基线，否则上游最新）'
         required: false
         default: ''
+      skip_release:
+        description: '仅构建验证，不发布 Release、不清理、不回写'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: '清理只演练（校验并列出将删除项），不删除、不回写'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,382 +72,267 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.detect.outputs.new_version }}
       matrix: ${{ steps.detect.outputs.matrix }}
       has_updates: ${{ steps.detect.outputs.has_updates }}
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 检测已启用上游项目的稳定版
+      - name: 安装配置解析依赖（job 隔离，不依赖其他 job 的安装）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+      - name: 检测启用上游相对各平台基线的更新
         id: detect
         env:
           FORCE_VERSION: ${{ github.event.inputs.version }}
-          FORCE_COMPONENTS: ${{ inputs.force }}
-          REPAIR_PAM: ${{ inputs.repair_pam }}
-          RETRY_COMPONENT: ${{ github.event.inputs.retry_component }}
+          FORCE: ${{ inputs.force }}
+          TARGETS: ${{ github.event.inputs.targets }}
         run: |
-          if [ -n "$RETRY_COMPONENT" ]; then
-            [ "$FORCE_COMPONENTS" != true ] && [ "$REPAIR_PAM" != true ] && [ -z "$FORCE_VERSION" ] || {
-              echo 'retry_component 不可与 force/repair_pam/version 同时使用' >&2; exit 2;
-            }
-            python3 scripts/check_versions.py --retry-component "$RETRY_COMPONENT" --output "$GITHUB_OUTPUT"
-          elif [ "$REPAIR_PAM" = true ]; then
-            [ "$FORCE_COMPONENTS" != true ] && [ -z "$FORCE_VERSION" ] || {
-              echo 'repair_pam 不可与 force/version 同时使用' >&2; exit 2;
-            }
-            python3 scripts/check_versions.py --repair-pam --output "$GITHUB_OUTPUT"
-          elif [ "$FORCE_COMPONENTS" = true ]; then
-            python3 scripts/check_versions.py --force --output "$GITHUB_OUTPUT"
-          else
-            python3 scripts/check_versions.py --output "$GITHUB_OUTPUT"
-          fi
+          args=()
+          [ -n "$FORCE_VERSION" ] && args+=(--openssh-version "$FORCE_VERSION")
+          [ "$FORCE" = true ] && args+=(--force)
+          [ -n "$TARGETS" ] && args+=(--targets "$TARGETS")
+          /usr/bin/python3 scripts/check_versions.py --output "$GITHUB_OUTPUT" "${args[@]}"
 
-  component-build:
-    name: 构建 ${{ matrix.package }} (${{ matrix.el }})
-    needs: check
-    if: needs.check.outputs.has_updates == 'true'
+  tests:
+    name: 本地行为测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 安装系统测试依赖（rpmbuild 供真实 header 测试）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm python3-rpm python3-yaml
+      - name: 运行本地行为测试
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+
+  build:
+    name: 构建 ${{ matrix.package }} (${{ matrix.platform }})
+    needs: [check, tests]
+    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     runs-on: ubuntu-latest
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      PACKAGE: ${{ matrix.package }}
+      VERSION: ${{ matrix.version }}
+      URL: ${{ matrix.url }}
+      PYTHON: /usr/bin/python3
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 用仓库打包规则构建官方最新源码
-        env:
-          ENTRY: ${{ toJSON(matrix) }}
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 安装配置解析依赖（job 隔离，不依赖其他 job 的安装）
         run: |
-          readarray -t args < <(python3 -c 'import json,os; p=json.loads(os.environ["ENTRY"]); print("\n".join(p[k] for k in ("package","el","version","url")))')
-          source scripts/platforms.sh
-          image="$(image_for "${args[1]}")"
-          if [ "${args[1]}" = ubuntu2204 ]; then
-            docker run --rm --platform linux/amd64 -v "$PWD":/src -e SRC_DIR=/src "$image" \
-              bash /src/scripts/build-openssh-deb.sh "${args[2]}"
-          elif [ "${args[0]}" = openssh ]; then
-            sed -i "s/^%global ver .*/%global ver ${args[2]}/" spec/openssh.spec
-            # Keep the artifact destination runner-owned before Docker creates dist as root.
-            mkdir -p "dist/openssh/${args[1]}"
-            docker run --rm -v "$PWD":/src -e SRC_DIR=/src "$image" \
-              bash /src/scripts/build-in-container.sh "${args[1]}"
-            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
-              bash /src/scripts/verify-rpms.sh "${args[1]}"
-            cp "dist/${args[1]}/"* "dist/openssh/${args[1]}/"
-          else
-            if [ "${args[0]}" = ntp ] && [ "$(platform_el "${args[1]}")" = el7 ]; then
-              bash scripts/fetch-ntp-openssl.sh "$PWD" "${args[1]}"
-            fi
-            docker run --rm -v "$PWD":/src -e SRC_DIR=/src "$image" \
-              bash /src/scripts/build-upstream.sh "${args[@]}"
-          fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+      - name: 统一构建入口（含产物门禁）
+        run: |
+          set -euo pipefail
+          eval "$(/usr/bin/python3 scripts/project_config.py shell "$PLATFORM" "$PACKAGE")"
+          cmd=(bash scripts/package.sh build "$PLATFORM" "$PACKAGE" "$VERSION")
+          # OpenSSH 源与镜像固定，构建不接收 URL；upstream 组件必须携带官方源。
+          case "$PACKAGE_KIND" in
+            openssh-*) ;;
+            *) cmd+=("$URL") ;;
+          esac
+          "${cmd[@]}"
+      - name: 上传构建产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: built-${{ matrix.package }}-${{ matrix.el }}
-          path: dist/${{ matrix.package }}/${{ matrix.el }}/
+          name: built-${{ matrix.platform }}-${{ matrix.package }}
+          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
           if-no-files-found: error
 
-  component-install:
-    name: 安装验证 ${{ matrix.package }} (${{ matrix.el }})
-    needs: [check, component-build]
-    if: always() && needs.check.outputs.has_updates == 'true'
+  test:
+    name: 安装验证 ${{ matrix.package }} (${{ matrix.platform }})
+    needs: [check, tests, build]
+    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     runs-on: ubuntu-latest
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      PACKAGE: ${{ matrix.package }}
+      PYTHON: /usr/bin/python3
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          # A failed matrix entry has no artifact; other platforms still proceed.
-          pattern: built-${{ matrix.package }}-${{ matrix.el }}
-          path: dist/${{ matrix.package }}/${{ matrix.el }}/
-          merge-multiple: true
-      - name: 干净目标系统中安装并运行
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
-        env:
-          PKG: ${{ matrix.package }}
-          EL: ${{ matrix.el }}
-          VERSION: ${{ matrix.version }}
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 安装配置解析依赖（job 隔离，不依赖其他 job 的安装）
         run: |
-          source scripts/platforms.sh
-          image="$(image_for "$EL")"
-          if [ "$EL" = ubuntu2204 ]; then
-            for s in fresh upgrade reinstall uninstall symlink-guard; do
-              docker run --rm --platform linux/amd64 -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
-                bash /src/scripts/test-openssh-deb.sh "$s" "$VERSION"
-            done
-            exit 0
-          fi
-          if [ "$PKG" = openssh ]; then
-            mkdir -p "dist/$EL"
-            cp "dist/openssh/$EL/"* "dist/$EL/"
-            fail=0
-            for s in fresh upgrade reinstall uninstall symlink-guard; do
-              docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
-                bash /src/scripts/test-install.sh "$EL" "$s" || fail=1
-            done
-            exit "$fail"
-          fi
-          docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src "$image" \
-            bash /src/scripts/test-upstream-install.sh "$PKG" "$EL" "$VERSION"
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+      - name: 下载本组合构建产物
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: built-${{ matrix.platform }}-${{ matrix.package }}
+          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
+      - name: 干净目标系统安装行为测试（SSH 五场景 / 组件 smoke）
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
+        run: bash scripts/package.sh test "$PLATFORM" "$PACKAGE"
       - name: 留下安装成功凭据
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
-        env:
-          PKG: ${{ matrix.package }}
-          EL: ${{ matrix.el }}
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
         run: |
           mkdir -p verified
-          printf '%s/%s\n' "$PKG" "$EL" > "verified/$PKG-$EL"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.package, matrix.el)) != ''
+          printf '%s/%s\n' "$PLATFORM" "$PACKAGE" > "verified/$PLATFORM-$PACKAGE"
+      - name: 上传安装验证凭据
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles(format('dist/{0}/{1}/SHA256SUMS', matrix.platform, matrix.package)) != ''
         with:
-          name: verified-${{ matrix.package }}-${{ matrix.el }}
+          name: verified-${{ matrix.platform }}-${{ matrix.package }}
           path: verified/
           if-no-files-found: error
 
-  build-el7:
-    needs: check
-    if: needs.check.outputs.new_version != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 对齐 spec 版本
-        env:
-          NEW_VERSION: ${{ needs.check.outputs.new_version }}
-        run: |
-          sed -i "s/^%global ver .*/%global ver ${NEW_VERSION}/" spec/openssh.spec
-          grep -n "%global ver" spec/openssh.spec
-      - name: 在官方 UBI7 容器内构建
-        run: |
-          source scripts/platforms.sh
-          docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
-            "$(image_for el7)" bash /src/scripts/build-in-container.sh el7
-      - name: 产物质量门禁（verify-rpms）
-        run: |
-          source scripts/platforms.sh
-          docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-            "$(image_for el7)" bash /src/scripts/verify-rpms.sh el7
-      - name: 上传构建产物
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rpms-el7
-          path: |
-            dist/el7/*.rpm
-            dist/el7/SHA256SUMS
-          if-no-files-found: error
-
-  build-el8:
-    needs: check
-    if: needs.check.outputs.new_version != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 对齐 spec 版本
-        env:
-          NEW_VERSION: ${{ needs.check.outputs.new_version }}
-        run: |
-          sed -i "s/^%global ver .*/%global ver ${NEW_VERSION}/" spec/openssh.spec
-          grep -n "%global ver" spec/openssh.spec
-      - name: 在官方 UBI8 容器内构建
-        run: |
-          source scripts/platforms.sh
-          docker run --rm -v "$PWD":/src -e SRC_DIR=/src \
-            "$(image_for el8)" bash /src/scripts/build-in-container.sh el8
-      - name: 产物质量门禁（verify-rpms）
-        run: |
-          source scripts/platforms.sh
-          docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-            "$(image_for el8)" bash /src/scripts/verify-rpms.sh el8
-      - name: 上传构建产物
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rpms-el8
-          path: |
-            dist/el8/*.rpm
-            dist/el8/SHA256SUMS
-          if-no-files-found: error
-
-  test-el7:
-    needs: build-el7
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 下载构建产物
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rpms-el7
-          path: dist/el7
-      - name: 安装行为测试（5 场景，每场景独立干净容器）
-        run: |
-          source scripts/platforms.sh
-          fail=0
-          for s in fresh upgrade reinstall uninstall symlink-guard; do
-            echo "########## el7 / $s ##########"
-            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-              "$(image_for el7)" bash /src/scripts/test-install.sh el7 "$s" || fail=1
-          done
-          exit $fail
-
-  test-el8:
-    needs: build-el8
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 下载构建产物
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rpms-el8
-          path: dist/el8
-      - name: 安装行为测试（5 场景，每场景独立干净容器）
-        run: |
-          source scripts/platforms.sh
-          fail=0
-          for s in fresh upgrade reinstall uninstall symlink-guard; do
-            echo "########## el8 / $s ##########"
-            docker run --rm -v "$PWD":/src:ro -e SRC_DIR=/src \
-              "$(image_for el8)" bash /src/scripts/test-install.sh el8 "$s" || fail=1
-          done
-          exit $fail
-
-  release:
-    needs: [check, build-el7, build-el8, test-el7, test-el8]
-    if: needs.check.outputs.new_version != '' && github.event.inputs.skip_release != 'true'
+  publish:
+    name: 发布 ${{ matrix.package }} (${{ matrix.platform }})
+    needs: [check, tests, build, test]
+    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success' && inputs.skip_release != true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      VER: ${{ needs.check.outputs.new_version }}
-      BRANCH: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      PLATFORM: ${{ matrix.platform }}
+      PACKAGE: ${{ matrix.package }}
+      VERSION: ${{ matrix.version }}
+      URL: ${{ matrix.url }}
     steps:
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 下载构建产物（按平台分目录，避免平铺覆盖）
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rpms-el7
-          path: dist/el7
-      - name: 下载构建产物（EL8）
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: rpms-el8
-          path: dist/el8
-      - name: 展示产物
-        run: find dist -type f | sort
-      - name: 幂等发布 Release（EL7/EL8 构建+测试全部通过才到达此步）
-        id: publish
-        run: |
-          set -uo pipefail
-          REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' spec/openssh.spec | head -1)"
-          [ -n "$REL" ] || { echo '无法读取 OpenSSH release' >&2; exit 1; }
-          TAG="v${VER}-${REL}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          # 期望资产：相对路径（el7/... el8/...）+ 两个改名后的 SUMS 文件
-          expected="$(cd dist && ls el7/*.rpm el8/*.rpm | sort)"
-          cp dist/el7/SHA256SUMS /tmp/SHA256SUMS-el7
-          cp dist/el8/SHA256SUMS /tmp/SHA256SUMS-el8
-
-          if python3 scripts/check_update.py has-release \
-              --repo "$GITHUB_REPOSITORY" --tag "$TAG"; then
-            # 重入路径：Release 已存在 → 必须证明资产完整且与本次产物逐一致，
-            # 否则视为失败，不发布也不回写版本。
-            echo "Release $TAG 已存在，校验资产完整性…"
-            gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
-            fail=0
-            { for a in $expected; do basename "$a"; done
-              echo SHA256SUMS-el7; echo SHA256SUMS-el8; } | sort -u |
-            while read -r a; do
-              grep -qx "$a" /tmp/assets.txt || echo "MISSING $a"
-            done > /tmp/missing.txt
-            if [ -s /tmp/missing.txt ]; then
-              cat /tmp/missing.txt >&2
-              echo "资产不完整，禁止重入（不发布、不回写版本）" >&2
-              exit 1
-            fi
-            tmpd="$(mktemp -d)"
-            gh release download "$TAG" --dir "$tmpd" --clobber
-            for a in $expected; do
-              l="$(sha256sum "dist/$a" | awk '{print $1}')"
-              r="$(sha256sum "$tmpd/$(basename "$a")" | awk '{print $1}')"
-              [ "$l" = "$r" ] || { echo "资产哈希不一致: $a (local=$l remote=$r)" >&2; exit 1; }
-            done
-            diff /tmp/SHA256SUMS-el7 "$tmpd/SHA256SUMS-el7" >/dev/null || { echo "SHA256SUMS-el7 不一致" >&2; exit 1; }
-            diff /tmp/SHA256SUMS-el8 "$tmpd/SHA256SUMS-el8" >/dev/null || { echo "SHA256SUMS-el8 不一致" >&2; exit 1; }
-            echo "资产校验通过：发布与回写均可安全重入"
-            exit 0
-          fi
-
-          # 首次发布
-          {
-            echo "## OpenSSH ${VER}（EL7 / EL8, x86_64）"
-            echo
-            echo "基于官方 UBI7 / UBI8 容器（固定 digest）构建；静态链接 OpenSSL 与 zlib，"
-            echo "动态链接 glibc / PAM / Kerberos5；不含图形 askpass。"
-            echo "构建门禁：三包 EVR/arch 校验、ELF 无 libcrypto/libssl/libz 动态依赖、"
-            echo "sshd 动态链接 libpam、PAM 模板为 password-auth 且默认 UsePAM yes、"
-            echo "/etc 零 payload、5 项安装行为测试全部通过。"
-            echo
-            echo "### 安装 / 升级须知"
-            echo "- 本包安装与升级**不会**自动重启、停止或重载正在运行的 sshd；"
-            echo "  升级后请择机手动执行："
-            echo "  \`service sshd restart\`（EL7）或 \`systemctl daemon-reload && systemctl restart sshd\`（EL8）。"
-            echo "- 从发行版 openssh-server 升级时，**旧包自带的卸载脚本可能触发一次重启**；"
-            echo "  本包已保证保留的配置可通过新版本语法检查（安装日志可见），但不对该重启作保证。"
-            echo "- 严格配置保留：/etc 下的配置以 ghost 方式登记所有权、不随包分发内容；"
-            echo "  任何升级都不会改写/移动/删除既有配置，也不会产生 .rpmnew/.rpmsave。"
-            echo "- 默认配置模板位于 /usr/share/openssh/，仅当 /etc 中目标缺失时才会补齐。"
-            echo "- 已安装旧坏包生成的 pam_stack.so 配置不会被覆盖；须由管理员通过安全通道手动修复。"
-            echo "- 不会改写任何已有 host key；缺失密钥由 init 脚本在首次启动时补齐。"
-            echo
-            echo "### 产物校验"
-            echo '```'
-            cat /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8
-            echo '```'
-            echo "源码：openssh-${VER}.tar.gz（构建时已验证官方 GPG 签名）；"
-            echo "OpenSSL 固定为 spec 内声明版本，不经 CI 自动升级。"
-          } > /tmp/notes.md
-          gh release create "$TAG" \
-            dist/el7/*.rpm dist/el8/*.rpm \
-            /tmp/SHA256SUMS-el7 /tmp/SHA256SUMS-el8 \
-            --title "OpenSSH ${VER} RPM (EL7/EL8, x86_64)" \
-            --notes-file /tmp/notes.md
-      - name: 安装 RPM 版本比较库
+      - name: 安装发布依赖（publish_release 读取 rpm header 与校验清单）
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-rpm
-      - name: 仅保留最高版本的 OpenSSH Release
-        id: retention
-        env:
-          PUBLISHED_TAG: ${{ steps.publish.outputs.tag }}
+          sudo apt-get install -y python3-rpm python3-yaml
+      - name: 下载安装验证凭据（缺失说明本组合构建或验证失败，发布随即失败）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-${{ matrix.platform }}-${{ matrix.package }}
+          path: verified/
+      - name: 下载本组合构建产物
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: built-${{ matrix.platform }}-${{ matrix.package }}
+          path: dist/${{ matrix.platform }}/${{ matrix.package }}/
+      - name: 幂等发布（校验资产完整后创建或重入，绝不在不一致时写凭据）
+        if: hashFiles(format('verified/{0}-{1}', matrix.platform, matrix.package)) != ''
         run: |
-          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" \
-            --tag "$PUBLISHED_TAG" --output "$GITHUB_OUTPUT"
-      - name: 回写 OpenSSH spec 与统一版本文件
-        if: steps.retention.outputs.retained == 'true'
+          /usr/bin/python3 scripts/publish_release.py --dir "dist/$PLATFORM/$PACKAGE" \
+            --platform "$PLATFORM" --package "$PACKAGE" --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" --source-url "$URL" --output "$GITHUB_OUTPUT"
+      - name: 上传发布凭据（receipt + 构建 spec / DEB 元数据）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles(format('verified/{0}-{1}', matrix.platform, matrix.package)) != ''
+        with:
+          name: receipt-${{ matrix.platform }}-${{ matrix.package }}
+          path: published/
+          if-no-files-found: error
+
+  finalize:
+    name: 清理历史 Release 并回写成功基线
+    needs: [check, tests, build, test, publish]
+    if: always() && needs.check.outputs.has_updates == 'true' && needs.tests.result == 'success' && inputs.skip_release != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ github.ref_name }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 合并全部组合的发布凭据
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: receipt-*
+          path: published
+          merge-multiple: true
+      - name: 安装版本比较依赖
         run: |
-          sed -i "s/^%global ver .*/%global ver ${VER}/" spec/openssh.spec
-          python3 - <<'PY'
-          import json, os, pathlib
-          path = pathlib.Path('version.json')
-          state = json.loads(path.read_text())
-          state['openssh'] = os.environ['VER']
-          path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n')
-          PY
-          if git diff --quiet -- spec/openssh.spec version.json; then
-            echo "版本已是 ${VER}，无回写需求（幂等）"
-            exit 0
-          fi
+          sudo apt-get update
+          sudo apt-get install -y python3-rpm python3-yaml
+      - name: 集中串行清理历史 Release（先校验后删除，保留 Git tag）
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          receipts=(published/receipts/*.json)
+          [ "${#receipts[@]}" -gt 0 ] || { echo '无成功发布的组合，跳过清理与回写'; exit 0; }
+          dry=""
+          [ "$DRY_RUN" = true ] && dry="--dry-run"
+          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" $dry "${receipts[@]}"
+      - name: 回写成功基线（每轮取最新分支重放 receipt + 防降级，无 rebase 状态残留）
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          receipts=(published/receipts/*.json)
+          [ "${#receipts[@]}" -gt 0 ] || exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add spec/openssh.spec version.json
-          git commit -m "build: OpenSSH ${VER}"
           ok=0
           for i in 1 2 3 4 5; do
-            if git fetch origin "$BRANCH" &&
-               git rebase "origin/$BRANCH" &&
-               git push origin "HEAD:$BRANCH"; then
+            # 每轮强制回到最新远端分支工作树：上一轮的本地 commit / 冲突残留全部
+            # 丢弃，绝不留下 rebase 进行中状态；凭据在最新基线上重放。
+            git fetch origin "$BRANCH" || { sleep 15; continue; }
+            git checkout -f -B "$BRANCH" "origin/$BRANCH" || { sleep 15; continue; }
+            # record 自带哈希校验与防降级：并发更新已写入的更高基线不会被覆盖。
+            /usr/bin/python3 scripts/record_versions.py version.json "${receipts[@]}" || { sleep 15; continue; }
+            if git diff --quiet -- version.json; then
+              echo "成功基线无变化（幂等，或并发更新已覆盖）"
+              ok=1
+              break
+            fi
+            git add version.json
+            git commit -m "build: record published baselines" || { sleep 15; continue; }
+            if git push origin "HEAD:$BRANCH"; then
+              ok=1
+              break
+            fi
+            echo "push 冲突，重试 $i/5"
+            sleep 15
+          done
+          [ "$ok" = 1 ] || { echo "回写重试耗尽（远端持续冲突）" >&2; exit 1; }
+
+  scheduled-time:
+    name: 记录最近一次成功调度时间
+    needs: [check, tests, build, test, publish, finalize]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.check.result == 'success' &&
+      needs.tests.result == 'success' &&
+      (needs.check.outputs.has_updates != 'true' ||
+       (needs.build.result == 'success' &&
+        needs.test.result == 'success' &&
+        needs.publish.result == 'success' &&
+        needs.finalize.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 更新根目录 time 并提交（每轮取最新远端分支，无 rebase 状态残留）
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ok=0
+          for i in 1 2 3 4 5; do
+            git fetch origin "$BRANCH" || { sleep 15; continue; }
+            git checkout -f -B "$BRANCH" "origin/$BRANCH" || { sleep 15; continue; }
+            date -u +'%Y-%m-%dT%H:%M:%SZ' > "time"
+            git add "time"
+            git commit -m 'chore: record successful scheduled scan' || { sleep 15; continue; }
+            if git push origin "HEAD:$BRANCH"; then
               ok=1
               break
             fi
@@ -441,186 +340,3 @@ jobs:
             sleep 15
           done
           [ "$ok" = 1 ] || { echo "push 重试耗尽" >&2; exit 1; }
-
-  component-release:
-    name: 发布 ${{ matrix.package }} (${{ matrix.el }})
-    needs: [check, component-build, component-install, release]
-    # Each package/platform is independent; a failed package has no published receipt.
-    if: always() && needs.check.outputs.has_updates == 'true' && inputs.skip_release != true
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PKG: ${{ matrix.package }}
-      EL: ${{ matrix.el }}
-      VERSION: ${{ matrix.version }}
-      SOURCE_URL: ${{ matrix.url }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 必须已经通过独立目标系统安装验证
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: verified-${{ matrix.package }}-${{ matrix.el }}
-          path: verified/
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
-        with:
-          name: built-${{ matrix.package }}-${{ matrix.el }}
-          path: dist/${{ matrix.package }}/${{ matrix.el }}/
-      - name: 校验后创建 Release
-        id: publish
-        if: hashFiles(format('verified/{0}-{1}', matrix.package, matrix.el)) != ''
-        run: |
-          set -euo pipefail
-          dir="dist/$PKG/$EL"
-          if [ "$EL" = ubuntu2204 ]; then
-            bash scripts/publish-openssh-deb.sh "$dir" "$VERSION"
-            exit 0
-          fi
-          selection="$(bash scripts/select-release-rpm.sh "$dir" "$PKG" "$VERSION" "$EL")"
-          IFS=$'\t' read -r rpmfile release <<< "$selection"
-          tag="${PKG}-${EL}-${VERSION}-${release}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          (cd "$dir" && sha256sum -c SHA256SUMS)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            tmp="$(mktemp -d)"
-            gh release download "$tag" --dir "$tmp"
-            for file in "$dir"/*.rpm "$dir/SHA256SUMS" "$dir/SOURCE-SHA256SUM" "$dir/$PKG-$EL.spec"; do
-              cmp "$file" "$tmp/$(basename "$file")"
-            done
-          else
-            source scripts/platforms.sh
-            image="$(image_for "$EL")"
-            spec="spec/$PKG/$(platform_el "$EL").spec"
-            if [ "$PKG" = openssh ]; then spec=spec/openssh.spec; fi
-            notes="官方上游源码：$SOURCE_URL；使用仓库 $spec 在 $image 构建，经过干净目标系统安装与命令验证。"
-            if [ "$PKG" = openssh ]; then
-              notes="$notes 已通过上游 regress、RPM 质量门禁与五项安装行为测试。静态链接 OpenSSL/zlib；保留已有配置和 host key，本包安装/升级不主动重启 sshd，旧发行版包卸载脚本仍可能触发重启。升级后请按需手动 service sshd restart；完整说明见仓库 README。"
-            fi
-            gh release create "$tag" "$dir"/*.rpm "$dir/SHA256SUMS" \
-              "$dir/SOURCE-SHA256SUM" "$dir/$PKG-$EL.spec" \
-              --title "$PKG $VERSION RPM ($EL, x86_64)" \
-              --notes "$notes"
-          fi
-      - name: 安装 RPM 版本比较库
-        if: steps.publish.outputs.tag != ''
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-rpm
-      - name: 仅保留同组件同系统的最高版本 Release
-        id: retention
-        if: steps.publish.outputs.tag != ''
-        env:
-          PUBLISHED_TAG: ${{ steps.publish.outputs.tag }}
-        run: |
-          /usr/bin/python3 scripts/prune_releases.py --repo "$GITHUB_REPOSITORY" \
-            --tag "$PUBLISHED_TAG" --output "$GITHUB_OUTPUT"
-      - name: 保存通过安装验证的版本和 spec
-        if: steps.retention.outputs.retained == 'true'
-        run: |
-          python3 - <<'PY'
-          import hashlib,json,os,pathlib,shutil
-          package,el,version = (os.environ[k] for k in ("PKG","EL","VERSION"))
-          if el == "ubuntu2204":
-              built = pathlib.Path("dist/openssh/ubuntu2204/build.json")
-              target = pathlib.Path("published/metadata/openssh-ubuntu2204.json")
-              target.parent.mkdir(parents=True,exist_ok=True)
-              shutil.copyfile(built,target)
-              receipt = pathlib.Path("published/receipts/openssh-ubuntu2204.json")
-              receipt.parent.mkdir(parents=True,exist_ok=True)
-              receipt.write_text(json.dumps({"package":package,"el":el,"version":version,
-                                            "metadata_sha256":hashlib.sha256(built.read_bytes()).hexdigest()}))
-              raise SystemExit(0)
-          built = pathlib.Path("dist")/package/el/(package+"-"+el+".spec")
-          target = pathlib.Path("published/spec")/package/(el+".spec")
-          target.parent.mkdir(parents=True,exist_ok=True)
-          shutil.copyfile(built,target)
-          receipt = pathlib.Path("published/receipts")/(package+"-"+el+".json")
-          receipt.parent.mkdir(parents=True,exist_ok=True)
-          receipt.write_text(json.dumps({"package":package,"el":el,"version":version,
-                                         "spec_sha256":hashlib.sha256(built.read_bytes()).hexdigest()}))
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.retention.outputs.retained == 'true'
-        with:
-          name: published-${{ matrix.package }}-${{ matrix.el }}
-          path: published/
-          if-no-files-found: error
-
-  component-record:
-    name: 回写已发布版本与 spec
-    needs: [check, component-release]
-    if: always() && needs.check.outputs.has_updates == 'true' && inputs.skip_release != true && needs.component-release.result != 'skipped'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: published-*
-          path: published
-          merge-multiple: true
-      - name: 合并已通过安装验证的组件
-        if: hashFiles('published/receipts/*.json') != ''
-        env:
-          BRANCH: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          git fetch origin "$BRANCH"
-          git rebase "origin/$BRANCH"
-          python3 scripts/record_versions.py version.json published/receipts/*.json
-          if git diff --quiet -- version.json spec/; then exit 0; fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add version.json spec/
-          git commit -m 'build: record published upstream versions'
-          for i in 1 2 3 4 5; do
-            git fetch origin "$BRANCH"
-            if git rebase "origin/$BRANCH" && git push origin "HEAD:$BRANCH"; then exit 0; fi
-            echo "版本回写重试 $i/5"
-            sleep 15
-          done
-          exit 1
-
-  scheduled-time:
-    name: 记录最近一次成功调度时间
-    needs: [check, release, component-build, component-install, component-release, component-record]
-    if: >-
-      github.event_name == 'schedule' &&
-      needs.check.result == 'success' &&
-      (needs.check.outputs.new_version == '' || needs.release.result == 'success') &&
-      (needs.check.outputs.has_updates != 'true' ||
-       (needs.component-build.result == 'success' &&
-        needs.component-install.result == 'success' &&
-        needs.component-release.result == 'success' &&
-        needs.component-record.result == 'success'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      BRANCH: ${{ github.ref_name }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: 更新根目录 time 并提交
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin "$BRANCH"
-          git rebase "origin/$BRANCH"
-          date -u +'%Y-%m-%dT%H:%M:%SZ' > "time"
-          git add "time"
-          git commit -m 'chore: record successful scheduled scan'
-          for i in 1 2 3 4 5; do
-            git fetch origin "$BRANCH"
-            if git rebase "origin/$BRANCH" && git push origin "HEAD:$BRANCH"; then exit 0; fi
-            sleep 15
-          done
-          exit 1

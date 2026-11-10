@@ -7,7 +7,7 @@ el="${1:?usage: test-openssh-upstream.sh <el7|el8> <build-tree>}"
 build="${2:?missing OpenSSH build tree}"
 source "${SRC_DIR:-/src}/scripts/repos-common.sh"
 "configure_repos_$el"
-install_build_deps "$el" "${SRC_DIR:-/src}/spec/openssh.spec"
+install_build_deps "$el" "${SRC_DIR:-/src}/${SPEC_PATH:?SPEC_PATH missing (invoke via scripts/package.sh)}"
 if [ "$el" = el7 ]; then
   yum -y -q install openssh-clients
 else

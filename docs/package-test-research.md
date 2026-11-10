@@ -4,6 +4,11 @@
 （上游仓库文件、GNU 官方文档、src.fedoraproject.org / gitlab.com/redhat 的真实
 spec 与 gating 仓库内容）；凡未能核实的均明确标注为**缺口**，不作推断。
 
+> **快照说明（历史研究文档）**：本文为 2026-09-27 的调研快照，仅作历史研究保留，正文不再随仓库演进更新。
+> 文中出现的目录布局、`spec/` 与 `source-assets/` 路径、workflow 行号（如第 151/242/263 行）均反映当日
+> 仓库结构；此后仓库重构为 `platforms/<platform>/packages/<package>/` 平台优先布局并统一 CI，
+> 这些路径与行号不再一一对应。当前测试门禁以 `AGENTS.md`、spec 与 `scripts/` 的实际内容为准。
+>
 > 下表的「本仓库现状」指调研开始时的状态。此后已追加 OpenSSH 密码登录及上游
 > regress、Vim 指定上游用例、NTP `make check`、chrony/telnet 回环检查；以仓库
 > `spec/` 和 `scripts/` 的最新内容为准。Vim 的完整 suite 在无 tty 的 UBI

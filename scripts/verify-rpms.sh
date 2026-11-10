@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # RPM 构建产物质量门禁（在对应平台容器内运行，位于安装行为测试之前）。
-# 用法: verify-rpms.sh <el7|el8|centos7>
+# 用法: verify-rpms.sh <platform>（platform 同时是 RPM dist 后缀，如 el7/centos7）
+# 环境变量由 scripts/package.sh 注入：PACKAGING_EL（补充源家族）、
+# DIST_DIR（dist/<platform>/<package>，含 build.spec）。
 #
 # 检查项：
 #   1. 三包齐全且 EVR/arch 正确（openssh / clients / server, x86_64）
@@ -11,12 +13,14 @@
 #   6. 模板文件与 ghost 声明齐全；server 运行依赖正确
 set -uo pipefail
 
-EL="${1:?usage: verify-rpms.sh <el7|el8|centos7>}"
-DIST="${SRC_DIR:-/src}/dist/$EL"
-# EL here is the RPM suffix, not the underlying packaging platform.
-source "${SRC_DIR:-/src}/scripts/platforms.sh"
-BASE_EL="$(platform_el "$EL")" || exit 2
-source "${SRC_DIR:-/src}/scripts/repos-common.sh"
+PLATFORM="${1:?usage: verify-rpms.sh <platform>}"
+SRC="${SRC_DIR:-/src}"
+: "${PACKAGING_EL:?PACKAGING_EL missing (invoke via scripts/package.sh)}"
+: "${DIST_DIR:?DIST_DIR missing (invoke via scripts/package.sh)}"
+DIST="$SRC/$DIST_DIR"
+# PLATFORM here is the RPM suffix, not the underlying packaging family.
+BASE_EL="$PACKAGING_EL"
+source "$SRC/scripts/repos-common.sh"
 "configure_repos_$BASE_EL" || exit 1
 FAIL=0
 pass() { echo "  PASS: $1"; }
@@ -30,31 +34,33 @@ if [ -n "${PKGS:-}" ]; then
 	if command -v dnf >/dev/null 2>&1; then dnf -y -q install $PKGS; else yum -y -q install $PKGS; fi
 fi
 
-SPEC="${SRC_DIR:-/src}/spec/openssh.spec"
-VER="$(sed -n 's/^%global ver[[:space:]]\+//p' "$SPEC" | head -1 | tr -d '[:space:]')"
-REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' "$SPEC" | head -1)"
+# 版本/修订号基准是本次构建留档的 spec 副本，而非源 spec。
+BUILD_SPEC="$DIST/build.spec"
+[ -f "$BUILD_SPEC" ] || { echo "missing build spec: $BUILD_SPEC (run scripts/package.sh build)" >&2; exit 2; }
+VER="$(sed -n 's/^%global ver[[:space:]]\+//p' "$BUILD_SPEC" | head -1 | tr -d '[:space:]')"
+REL="$(sed -n 's/^%global rel \([0-9][0-9]*\).*/\1/p' "$BUILD_SPEC" | head -1)"
 
-echo "== [$EL] 1) 三包齐全与 EVR/arch"
+echo "== [$PLATFORM] 1) 三包齐全与 EVR/arch"
 for p in openssh openssh-clients openssh-server; do
-	f="$DIST/$p-$VER-$REL.$EL.x86_64.rpm"
+	f="$DIST/$p-$VER-$REL.$PLATFORM.x86_64.rpm"
 	if [ -f "$f" ]; then pass "$(basename "$f") 存在"; else fail "缺失 $f"; continue; fi
 	got="$(rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$f")"
-	[ "$got" = "$p-$VER-$REL.$EL.x86_64" ] && pass "EVR/arch: $got" || fail "EVR/arch 期望 $p-$VER-$REL.$EL.x86_64，实际 $got"
+	[ "$got" = "$p-$VER-$REL.$PLATFORM.x86_64" ] && pass "EVR/arch: $got" || fail "EVR/arch 期望 $p-$VER-$REL.$PLATFORM.x86_64，实际 $got"
 done
 
-echo "== [$EL] 2) SHA256SUMS"
+echo "== [$PLATFORM] 2) SHA256SUMS"
 ( cd "$DIST" && grep -v SHA256SUMS SHA256SUMS | sha256sum -c --quiet ) \
 	&& pass "SHA256SUMS 校验通过" || fail "SHA256SUMS 不一致"
 
-echo "== [$EL] 3/4) ELF 动态依赖检查（静态 libcrypto/libssl/zlib + 动态 PAM）"
+echo "== [$PLATFORM] 3/4) ELF 动态依赖检查（静态 libcrypto/libssl/zlib + 动态 PAM）"
 # 用 readelf 检查“直接 NEEDED”：ldd 会列出 krb5 等传递依赖（如 libk5crypto→libcrypto.so），
 # 造成误判；静态链接成功的判定是二进制自身 NEEDED 中不含 libcrypto/libssl/libz。
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/x"
-for rpm in "$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" \
-           "$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
-           "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; do
+for rpm in "$DIST/openssh-$VER-$REL.$PLATFORM.x86_64.rpm" \
+           "$DIST/openssh-clients-$VER-$REL.$PLATFORM.x86_64.rpm" \
+           "$DIST/openssh-server-$VER-$REL.$PLATFORM.x86_64.rpm"; do
 	( cd "$TMP/x" && rpm2cpio "$rpm" | cpio -idm --quiet ) || { fail "解包失败: $rpm"; }
 done
 FOUND_SSL=0; FOUND_Z=0
@@ -74,13 +80,13 @@ done
 [ -x "$TMP/x/usr/libexec/openssh/sshd-auth" ] && pass "sshd-auth 就位" || fail "缺少 sshd-auth"
 [ -x "$TMP/x/usr/bin/ssh" ] && pass "客户端二进制就位" || fail "缺少 ssh"
 
-echo "== [$EL] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）"
+echo "== [$PLATFORM] 5) /etc 无真实 payload（仅允许 ghost 标记与目录项）"
 # FILEFLAGS 位: CONFIG=1 NOREPLACE=16 GHOST=64 → ghost 配置为 81。
 # 目录（flags=0，perms 以 d 开头）允许真实存在（如 /etc/ssh）。
 BAD_ETC="$(rpm -qp --qf '[%{FILENAMES}\t%{FILEFLAGS}\t%{FILEMODES:perms}\n]' \
-	"$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm" \
-	"$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
-	"$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" 2>/dev/null |
+	"$DIST/openssh-server-$VER-$REL.$PLATFORM.x86_64.rpm" \
+	"$DIST/openssh-clients-$VER-$REL.$PLATFORM.x86_64.rpm" \
+	"$DIST/openssh-$VER-$REL.$PLATFORM.x86_64.rpm" 2>/dev/null |
 	while IFS=$'\t' read -r path flags perms; do
 		case "$path" in
 		/etc/*)
@@ -99,11 +105,11 @@ else
 	pass "/etc 下无真实 payload（全部为 config+noreplace+ghost 声明）"
 fi
 
-echo "== [$EL] 6) 模板与 ghost 声明、运行依赖"
+echo "== [$PLATFORM] 6) 模板与 ghost 声明、运行依赖"
 FILELIST=""
-for r in "$DIST/openssh-$VER-$REL.$EL.x86_64.rpm" \
-         "$DIST/openssh-clients-$VER-$REL.$EL.x86_64.rpm" \
-         "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; do
+for r in "$DIST/openssh-$VER-$REL.$PLATFORM.x86_64.rpm" \
+         "$DIST/openssh-clients-$VER-$REL.$PLATFORM.x86_64.rpm" \
+         "$DIST/openssh-server-$VER-$REL.$PLATFORM.x86_64.rpm"; do
 	# 数组标签必须用 [] 重复括号；[] 内不可混入标量（el8 rpm 4.14 直接报错）
 	FILELIST="$FILELIST$(rpm -qp --qf '[%{FILENAMES}\n]' "$r")"$'\n'
 done
@@ -115,15 +121,15 @@ done
 for g in /etc/ssh/sshd_config /etc/ssh/ssh_config /etc/ssh/moduli /etc/pam.d/sshd /etc/rc.d/init.d/sshd; do
 	echo "$FILELIST" | grep -qx "$g" && pass "ghost 声明 $g" || fail "缺 ghost 声明 $g"
 done
-REQ="$(rpm -qp --requires "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm")"
+REQ="$(rpm -qp --requires "$DIST/openssh-server-$VER-$REL.$PLATFORM.x86_64.rpm")"
 echo "$REQ" | grep -q "initscripts" && pass "Requires initscripts" || fail "缺 Requires initscripts"
 echo "$REQ" | grep -q "chkconfig" && pass "Requires chkconfig" || fail "缺 Requires chkconfig"
 echo "$REQ" | grep -qE "pam|system-auth" && pass "Requires pam" || fail "缺 Requires pam"
-if bash "${SRC_DIR:-/src}/scripts/verify-pam-rpms.sh" openssh "$DIST/openssh-server-$VER-$REL.$EL.x86_64.rpm"; then
+if bash "$SRC/scripts/verify-pam-rpms.sh" openssh "$DIST/openssh-server-$VER-$REL.$PLATFORM.x86_64.rpm"; then
 	pass "sshd PAM 模板无旧模块且含发行版认证栈"
 else
 	fail "sshd PAM 模板无效"
 fi
 
-echo "== [$EL] verify 结果: $FAIL failure(s)"
+echo "== [$PLATFORM] verify 结果: $FAIL failure(s)"
 exit $((FAIL > 0))

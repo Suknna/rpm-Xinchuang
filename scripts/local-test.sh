@@ -1,38 +1,67 @@
 #!/usr/bin/env bash
-# 本地行为测试辅助：在干净的对应平台容器中逐场景执行 test-install.sh。
-# 用法: local-test.sh <el7|el8|centos7|all> [场景...]（缺省跑全部5场景）
+# 本地行为测试辅助：统一转发到 scripts/package.sh。
+# 兼容旧签名: local-test.sh <platform|all> [场景...]（包固定 openssh，5 场景缺省全跑）
+# 新签名:     local-test.sh <platform|all> [package] [场景...]
+# all 按 platforms/<id>/platform.yaml 动态筛选启用该包的平台，不硬编码平台清单。
 set -uo pipefail
 
-EL="${1:?usage: local-test.sh <el7|el8|centos7|all> [scenario...]}"
-shift || true
-SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(fresh upgrade reinstall uninstall symlink-guard)
-
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=scripts/platforms.sh
-source "$REPO_ROOT/scripts/platforms.sh"
-OVERALL=0
-
-run_el() {
-	local el="$1" scenario img
-	img="$(image_for "$el")" || exit 2
-	for scenario in "${SCENARIOS[@]}"; do
-		echo ""
-		echo "########## $el / $scenario ##########"
-		if ! sudo docker run --rm \
-			-v "$REPO_ROOT":/src:ro \
-			-e SRC_DIR=/src \
-			"$img" \
-			bash /src/scripts/test-install.sh "$el" "$scenario"; then
-			echo "!!!!! $el/$scenario FAILED"
-			OVERALL=1
-		fi
-	done
+PLATFORM="${1:?usage: local-test.sh <el7|el8|centos7|ubuntu2204|all> [package] [scenario...]}"
+shift
+case "${1:-}" in
+"" | fresh | upgrade | reinstall | uninstall | symlink-guard)
+	# 旧签名：场景直接跟在平台后，包固定 openssh。
+	PACKAGE="openssh"
+	;;
+*)
+	PACKAGE="$1"
+	shift
+	;;
+esac
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 宿主解释器统一入口（与 package.sh 一致，见其注释）。
+PYTHON="${PYTHON:-/usr/bin/python3}"
+command -v "$PYTHON" >/dev/null 2>&1 || {
+	echo "local-test.sh: PYTHON interpreter not found: '$PYTHON' (set PYTHON=/usr/bin/python3)" >&2
+	exit 2
 }
 
-case "$EL" in
-all) run_el el7 && run_el el8 && run_el centos7 ;;
-*) run_el "$EL" ;;
+# 启用 <package> 的平台列表（宿主侧 YAML 解析与 enabled 过滤，含暂停包排除）。
+enabled_platforms() {
+	(cd "$ROOT" && "$PYTHON" - "$PACKAGE" <<'PY'
+import sys
+
+sys.path.insert(0, "scripts")
+import project_config
+
+package = sys.argv[1]
+for target in project_config.iter_targets(project_config.load_config()):
+    if target["package"] == package:
+        print(target["platform"])
+PY
+)
+}
+
+OVERALL=0
+run_one() {
+	local p="$1"
+	shift
+	bash "$ROOT/scripts/package.sh" test "$p" "$PACKAGE" "$@" || OVERALL=1
+}
+
+case "$PLATFORM" in
+all)
+	mapfile -t platforms < <(enabled_platforms)
+	if [ "${#platforms[@]}" -eq 0 ]; then
+		echo "local-test.sh: no enabled platform builds '$PACKAGE'" >&2
+		exit 2
+	fi
+	for p in "${platforms[@]}"; do
+		run_one "$p" "$@"
+	done
+	;;
+*)
+	run_one "$PLATFORM" "$@"
+	;;
 esac
 
-exit $OVERALL
+exit "$OVERALL"

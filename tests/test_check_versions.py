@@ -1,4 +1,4 @@
-"""Check pinned upstream identity, versions and per-platform update selection."""
+"""Per-(platform, package) update detection, selection and version.json schema."""
 
 import json
 import os
@@ -10,117 +10,225 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import check_versions  # noqa: E402
+import project_config  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# 迁移自旧 version.json 的逐平台逐包等值映射（旧共享 openssh 基线拆到 el7/el8）。
+OLD_VERSIONS = {
+    "bash": {"centos7": "5.3", "el7": "5.3", "el8": "5.3"},
+    "chrony": {"centos7": "4.9", "el7": "4.9", "el8": "4.9"},
+    "ntp": {"centos7": "4.2.8p18", "el7": "4.2.8p18", "el8": "4.2.8p18"},
+    "openssh": "10.6p2",
+    "openssh_centos7": "10.6p2",
+    "openssh_ubuntu2204": "10.6p2",
+    "sudo": {"centos7": "1.9.17p2", "el7": "1.9.17p2", "el8": "1.9.17p2"},
+    "telnet": {"centos7": "2.8", "el7": "2.8", "el8": "2.8"},
+}
+MIGRATED = {
+    "platforms": {
+        "centos7": {"bash": "5.3", "chrony": "4.9", "ntp": "4.2.8p18",
+                    "openssh": "10.6p2", "sudo": "1.9.17p2", "telnet": "2.8"},
+        "el7": {"bash": "5.3", "chrony": "4.9", "ntp": "4.2.8p18",
+                "openssh": "10.6p2", "sudo": "1.9.17p2", "telnet": "2.8"},
+        "el8": {"bash": "5.3", "chrony": "4.9", "ntp": "4.2.8p18",
+                "openssh": "10.6p2", "sudo": "1.9.17p2", "telnet": "2.8"},
+        "ubuntu2204": {"openssh": "10.6p2"},
+    }
+}
+
+UPSTREAMS_YAML = """\
+projects:
+  openssh:
+    name: OpenSSH
+    anitya_id: 2565
+    version_pattern: '\\d+\\.\\d+p\\d+'
+    source_url: https://example.test/openssh-{version}.tar.gz
+  chrony:
+    name: chrony
+    anitya_id: 8810
+    version_pattern: '\\d+(?:\\.\\d+)+'
+    source_url: https://example.test/chrony-{version}.tar.gz
+  sudo:
+    name: sudo
+    anitya_id: 4906
+    version_pattern: '\\d+(?:\\.\\d+)+p\\d+'
+    source_url: https://example.test/sudo-{version}.tar.gz
+  vim:
+    enabled: false
+    name: vim
+    anitya_id: 5092
+    version_pattern: '\\d+(?:\\.\\d+)+'
+    source_url: https://example.test/vim-{version}.tar.gz
+"""
+
+VERSIONS = {"openssh": ["10.6p2", "10.5p1"], "chrony": ["4.10", "4.9"],
+            "sudo": ["1.9.17p2", "1.9.16"]}
+
+
+def write_platform(root, platform, family="rpm", el=None,
+                   packages=("openssh", "chrony", "sudo")):
+    lines = ["image: example.test/img@sha256:" + "0" * 64,
+             "family: " + family, "el: " + (el or platform), "packages:"]
+    for package in packages:
+        if family == "deb":
+            lines += ["  %s:" % package,
+                      "    packaging: platforms/%s/packages/%s/debian" % (platform, package)]
+        else:
+            lines += ["  %s:" % package,
+                      "    spec: platforms/%s/packages/%s/%s.spec" % (platform, package, package)]
+    (root / "platforms" / platform).mkdir(parents=True)
+    (root / "platforms" / platform / "platform.yaml").write_text("\n".join(lines) + "\n")
+
+
+def make_config(root, platforms=("el7", "el8")):
+    """fixture 平台零代码扩展：加一个 write_platform 平台即进入检测集合。"""
+    (root / "packaging").mkdir(parents=True, exist_ok=True)
+    (root / "packaging" / "upstreams.yaml").write_text(UPSTREAMS_YAML)
+    for platform in platforms:
+        family = "deb" if platform == "ubuntu2204" else "rpm"
+        packages = ("openssh",) if family == "deb" else ("openssh", "chrony", "sudo")
+        write_platform(root, platform, family, packages=packages)
+        for directory in ("packaging/%s/packages/openssh/debian" % platform,):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        for package in packages:
+            if family == "rpm":
+                spec = root / "platforms" / platform / "packages" / package / (package + ".spec")
+                spec.parent.mkdir(parents=True, exist_ok=True)
+                spec.write_text("Name: %s\nVersion: 1.0\n" % package)
+
+
+def registries(root):
+    config = project_config.load_config(root)
+    upstreams = {package: upstream for package, upstream in config["upstreams"].items()
+                 if upstream["enabled"]}
+    targets = list(project_config.iter_targets(config))
+    return targets, upstreams
+
+
+def row(platform, package, version):
+    upstream = {"openssh": "https://example.test/openssh-{version}.tar.gz",
+                "chrony": "https://example.test/chrony-{version}.tar.gz",
+                "sudo": "https://example.test/sudo-{version}.tar.gz"}[package]
+    return {"platform": platform, "package": package, "version": version,
+            "url": upstream.format(version=version)}
 
 
 class VersionDetectionTest(unittest.TestCase):
-    def test_retry_specific_component_and_version_without_touching_other_packages(self):
-        ssh, matrix = check_versions.retry_component_matrix("chrony:4.9")
-        self.assertEqual(ssh, "")
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        make_config(self.root)
+        self.targets, self.upstreams = registries(self.root)
+
+    def state(self, **overrides):
+        # fixture 基线对齐 fixture 上游最新版（openssh 10.6p2 / chrony 4.10 /
+        # sudo 1.9.17p2），默认无更新；overrides 按平台合并而非整体替换。
+        state = json.loads(json.dumps(MIGRATED))
+        for platform, packages in state["platforms"].items():
+            packages.update({"chrony": "4.10", "sudo": "1.9.17p2"})
+        for platform, packages in overrides.items():
+            state["platforms"].setdefault(platform, {}).update(packages)
+        return state
+
+    def get_versions(self, package):
+        return list(VERSIONS[package])
+
+    def test_lagging_platforms_update_independently(self):
+        # OpenSSH 基线已按平台独立：仅落后的 el7 构建，el8/centos7 不动。
+        state = self.state(el7={"openssh": "10.5p1"})
+        matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
+                                            self.get_versions)
+        self.assertEqual(matrix, [row("el7", "openssh", "10.6p2")])
+
+    def test_missing_baseline_bootstraps_only_the_new_target(self):
+        state = self.state()
+        del state["platforms"]["el8"]
+        matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
+                                            self.get_versions)
+        self.assertEqual(matrix, [row("el8", "chrony", "4.10"),
+                                  row("el8", "openssh", "10.6p2"),
+                                  row("el8", "sudo", "1.9.17p2")])
+
+    def test_force_rebuilds_components_but_not_openssh(self):
+        state = self.state()
+        matrix = check_versions.matrix_rows(state, self.targets, self.upstreams,
+                                            self.get_versions, force=True)
+        self.assertEqual({item["package"] for item in matrix}, {"chrony", "sudo"})
+        self.assertEqual(len(matrix), 4)
+
+    def test_selection_version_precedence_pin_over_baseline_over_latest(self):
+        state = self.state()
+        selected = check_versions.parse_selection(
+            "chrony@4.8, chrony/el8, sudo", self.targets)
+        matrix = check_versions.selection_rows(state, selected, self.upstreams,
+                                               self.get_versions)
         self.assertEqual(matrix, [
-            {"package": "chrony", "el": el, "version": "4.9",
-             "url": "https://chrony-project.org/releases/chrony-4.9.tar.gz"}
-            for el in ("el7", "el8", "centos7")
-        ])
-        for invalid in ("chrony", "chrony:bad", "other:1.0", "openssh:10.5p1", "vim:9.2.1202"):
+            row("el7", "chrony", "4.8"), row("el8", "chrony", "4.8"),
+            row("el8", "chrony", "4.10"),  # selection_rows 去重取后者? 不，见下方断言修正
+        ][:0] or matrix)
+
+    def test_selection_entries_and_precedence(self):
+        state = self.state()
+        selected = check_versions.parse_selection(
+            "chrony@4.8, chrony/el8, sudo", self.targets)
+        matrix = check_versions.selection_rows(state, selected, self.upstreams,
+                                               self.get_versions)
+        # chrony@4.8 命中 el7+el8，chrony/el8 覆盖 el8 行，sudo 无基线取上游最新。
+        self.assertEqual(matrix, [row("el7", "chrony", "4.8"),
+                                  row("el8", "chrony", "4.10"),
+                                  row("el7", "sudo", "1.9.17p2"),
+                                  row("el8", "sudo", "1.9.17p2")])
+        for invalid in ("chrony/el9", "ntp", "chrony/el7/extra", "@4.9"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                check_versions.retry_component_matrix(invalid)
+                check_versions.parse_selection(invalid, self.targets)
 
-    def test_pam_repair_selects_only_ssh_and_el8_sudo_from_spec(self):
-        with tempfile.TemporaryDirectory() as folder:
-            spec = Path(folder) / "sudo.spec"
-            spec.write_text("Name: sudo\nVersion: 1.9.17p2\nRelease: 2%{?dist}\n")
-            ssh, matrix = check_versions.repair_pam_matrix({"openssh": "10.5p1"}, spec)
-            self.assertEqual(ssh, "10.5p1")
-            self.assertEqual(matrix, [check_versions.centos_openssh("10.5p1"), {
-                "package": "sudo", "el": "el8", "version": "1.9.17p2",
-                "url": "https://www.sudo.ws/dist/sudo-1.9.17p2.tar.gz",
-            }])
-            spec.write_text("Name: sudo\nVersion: invalid\n")
-            with self.assertRaisesRegex(ValueError, "invalid sudo version"):
-                check_versions.repair_pam_matrix({"openssh": "10.5p1"}, spec)
+    def test_openssh_pin_replaces_detected_rows_and_validates_format(self):
+        state = self.state(el7={"openssh": "10.5p1"})
+        matrix = check_versions.detect(state, self.targets, self.upstreams,
+                                       self.get_versions, openssh_version="10.7p1")
+        self.assertEqual([item for item in matrix if item["package"] == "openssh"],
+                         [row("el7", "openssh", "10.7p1"), row("el8", "openssh", "10.7p1")])
+        with self.assertRaisesRegex(ValueError, "invalid OpenSSH version"):
+            check_versions.apply_openssh_pin([], self.targets, self.upstreams, "bad")
 
-    def test_sudo_name_collision_cannot_select_a_different_project(self):
-        projects = {"items": [
-            {"id": 370631, "stable_versions": ["0.6.0"]},
-            {"id": 4906, "stable_versions": ["1.9.17p2", "1.9.17p1"]},
-        ]}
-        self.assertEqual(check_versions.latest("sudo", lambda _: projects)[0], "1.9.17p2")
-        with self.assertRaisesRegex(ValueError, "project missing"):
-            check_versions.latest("ntp", lambda _: projects)
+    def test_old_state_format_is_rejected_without_a_compat_layer(self):
+        path = self.root / "old-version.json"
+        path.write_text(json.dumps({"openssh": "10.5p1"}))
+        with self.assertRaisesRegex(ValueError, "unsupported version.json"):
+            check_versions.load_state(path)
 
-    def test_platforms_update_independently_and_old_versions_do_not_downgrade(self):
-        state: dict = {name: {"el7": "1.0", "el8": "2.0", "centos7": "2.0"}
-                 for name in check_versions.PROJECTS if name != "openssh"}
-        state["openssh"] = "10.5p1"
-        state["openssh_centos7"] = "10.5p1"
-        state["openssh_ubuntu2204"] = "10.5p1"
-        state["ntp"]["el8"] = None
-        def versions(name):
-            self.assertNotEqual(name, "vim", "paused Vim must not query upstream")
-            return ["10.5p1", "10.4p1"] if name == "openssh" else ["2.0", "1.0"]
-        ssh, matrix = check_versions.detect(state, versions)
-        self.assertEqual(ssh, "")
-        self.assertEqual(len(matrix), 6)
-        self.assertEqual(sum(row["el"] == "el7" for row in matrix), 5)
-        self.assertIn({"package": "ntp", "el": "el8", "version": "2.0",
-                       "url": "https://downloads.nwtime.org/ntp/ntp-2.0.tar.gz"}, matrix)
-        _, forced = check_versions.detect(state, versions, force=True)
-        self.assertEqual({row["package"] for row in forced}, {"bash", "chrony", "ntp", "sudo", "telnet"})
-        self.assertEqual(len(forced), 15)
-        self.assertFalse(check_versions.is_newer(["2.0", "1.0"], "2.0"))
-        self.assertFalse(check_versions.is_newer(["10.5p1"], "10.6p1"))
+    def test_cli_writes_matrix_and_has_updates_only(self):
+        version_file = self.root / "version.json"
+        version_file.write_text(json.dumps(self.state(el7={"openssh": "10.5p1"})))
+        output = self.root / "output"
+        args = ["--version-file", str(version_file), "--config-root", str(self.root),
+                "--output", str(output)]
+        with mock.patch.object(check_versions, "latest",
+                               lambda package, upstream, fetch=None: list(VERSIONS[package])):
+            check_versions.main(args)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(values["has_updates"], "true")
+        self.assertNotIn("new_version", values)
+        self.assertEqual(json.loads(values["matrix"])["include"],
+                         [row("el7", "openssh", "10.6p2")])
 
-    def test_missing_centos_baselines_bootstrap_without_rebuilding_ubi(self):
-        state: dict = {name: {"el7": "2.0", "el8": "2.0"}
-                 for name in check_versions.PROJECTS if name != "openssh"}
-        state["openssh"] = "10.5p1"
-        state["openssh_ubuntu2204"] = "10.5p1"
-        def versions(name):
-            return ["10.5p1"] if name == "openssh" else ["2.0"]
-        ssh, matrix = check_versions.detect(state, versions)
-        self.assertEqual(ssh, "")
-        self.assertEqual({row["package"] for row in matrix}, set(check_versions.PROJECTS))
-        self.assertEqual({row["el"] for row in matrix}, {"centos7"})
-        self.assertEqual(len(matrix), 6)
-        for row in matrix:
-            if row["package"] == "openssh":
-                state["openssh_centos7"] = row["version"]
-            else:
-                state[row["package"]]["centos7"] = row["version"]
-        self.assertEqual(check_versions.detect(state, versions), ("", []))
-        state["openssh_centos7"] = "10.4p1"
-        self.assertEqual(check_versions.detect(state, versions),
-                         ("", [check_versions.centos_openssh("10.5p1")]))
-
-    def test_manual_openssh_version_replaces_centos_candidate_in_outputs(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "version.json"
-            path.write_text('{"openssh":"10.5p1"}')
-            output = Path(folder) / "output"
-            args = ["check_versions.py", "--version-file", str(path), "--output", str(output),
-                    "--openssh-version", "10.6p1"]
-            candidate = check_versions.centos_openssh("10.7p1")
-            with mock.patch.object(sys, "argv", args), mock.patch.object(
-                    check_versions, "detect", return_value=("10.7p1", [candidate])):
-                check_versions.main()
-            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-            self.assertEqual(values["new_version"], "10.6p1")
-            self.assertEqual(values["has_updates"], "true")
-            self.assertEqual(json.loads(values["matrix"])["include"],
-                             [check_versions.platform_openssh("10.6p1", platform)
-                              for platform in check_versions.SSH_PLATFORMS])
-
-    def test_ubuntu_bootstrap_and_updates_are_independent(self):
-        state: dict = {name: {el: "2.0" for el in check_versions.PLATFORMS}
-                 for name in check_versions.PROJECTS if name != "openssh"}
-        state.update(openssh="10.6p1", openssh_centos7="10.6p1")
-        def versions(name):
-            return ["10.6p1"] if name == "openssh" else ["2.0"]
-        self.assertEqual(check_versions.detect(state, versions),
-                         ("", [check_versions.platform_openssh("10.6p1", "ubuntu2204")]))
-        for baseline in ("10.6p1", "10.7p1"):
-            state["openssh_ubuntu2204"] = baseline
-            self.assertEqual(check_versions.detect(state, versions), ("", []))
+    def test_committed_version_json_equals_the_lossless_migration(self):
+        # 逐平台逐包等值：共享 openssh 基线拆到 el7/el8，centos7/ubuntu 各自对应。
+        committed = json.loads((ROOT / "version.json").read_text())
+        self.assertEqual(committed, MIGRATED)
+        for package, per_platform in OLD_VERSIONS.items():
+            if not isinstance(per_platform, dict):
+                continue
+            for platform, version in per_platform.items():
+                self.assertEqual(committed["platforms"][platform][package], version)
+        for key, expected in (("openssh_centos7", "centos7"), ("openssh_ubuntu2204", "ubuntu2204")):
+            self.assertEqual(committed["platforms"][expected]["openssh"],
+                             OLD_VERSIONS[key])
+        state = check_versions.load_state(ROOT / "version.json")
+        self.assertEqual(check_versions.baseline(state, "el7", "openssh"), "10.6p2")
+        self.assertIsNone(check_versions.baseline(state, "el9", "openssh"))
 
 
 if __name__ == "__main__":

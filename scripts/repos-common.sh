@@ -2,7 +2,7 @@
 # yum/dnf 仓库配置（build 与 test 脚本共用，source 本文件）。
 #
 # 原则：
-#   * 基础镜像为官方 UBI7 / UBI8 / CentOS 7，digest 固定在 platforms.sh；
+#   * 基础镜像为官方 UBI7 / UBI8 / CentOS 7，digest 固定在 platforms/<id>/platform.yaml；
 #   * EL7 使用归档源，EL8 补充免费镜像源解决 UBI 缺包问题；
 #   * 所有源一律 gpgcheck=1（不禁用签名校验）；
 #   * GPG 公钥固定在本仓库 certs/ 下（指纹已对照官方页面逐一核验，

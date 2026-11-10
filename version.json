@@ -1,30 +1,31 @@
 {
-  "bash": {
-    "centos7": "5.3",
-    "el7": "5.3",
-    "el8": "5.3"
-  },
-  "chrony": {
-    "centos7": "4.9",
-    "el7": "4.9",
-    "el8": "4.9"
-  },
-  "ntp": {
-    "centos7": "4.2.8p18",
-    "el7": "4.2.8p18",
-    "el8": "4.2.8p18"
-  },
-  "openssh": "10.6p2",
-  "openssh_centos7": "10.6p2",
-  "openssh_ubuntu2204": "10.6p2",
-  "sudo": {
-    "centos7": "1.9.17p2",
-    "el7": "1.9.17p2",
-    "el8": "1.9.17p2"
-  },
-  "telnet": {
-    "centos7": "2.8",
-    "el7": "2.8",
-    "el8": "2.8"
+  "platforms": {
+    "centos7": {
+      "bash": "5.3",
+      "chrony": "4.9",
+      "ntp": "4.2.8p18",
+      "openssh": "10.6p2",
+      "sudo": "1.9.17p2",
+      "telnet": "2.8"
+    },
+    "el7": {
+      "bash": "5.3",
+      "chrony": "4.9",
+      "ntp": "4.2.8p18",
+      "openssh": "10.6p2",
+      "sudo": "1.9.17p2",
+      "telnet": "2.8"
+    },
+    "el8": {
+      "bash": "5.3",
+      "chrony": "4.9",
+      "ntp": "4.2.8p18",
+      "openssh": "10.6p2",
+      "sudo": "1.9.17p2",
+      "telnet": "2.8"
+    },
+    "ubuntu2204": {
+      "openssh": "10.6p2"
+    }
   }
 }

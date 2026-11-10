@@ -1,0 +1,27 @@
+# CentOS 7 平台：完整复用 EL7 打包（packages 指向 platforms/el7/ 下的 spec/assets），
+# 但保留独立构建目录、.centos7 RPM 后缀和发布状态；修改 EL7 打包规则会同步影响本平台。
+# Docker Official Image centos:7.9.2009, linux/amd64 manifest.
+image: docker.io/library/centos@sha256:dead07b4d8ed7e29e98de0f4504d87e8880d4347859d839686a31da35a3b532f
+family: rpm
+el: el7
+packages:
+  openssh:
+    spec: packaging/common/openssh/openssh.spec
+    packaging: packaging/common/openssh
+    assets: packaging/common/openssh
+  bash:
+    spec: platforms/el7/packages/bash/bash.spec
+  chrony:
+    spec: platforms/el7/packages/chrony/chrony.spec
+    aux_source: 10
+  ntp:
+    spec: platforms/el7/packages/ntp/ntp.spec
+    aux_source: 5
+    pre_build: ntp-openssl
+  sudo:
+    spec: platforms/el7/packages/sudo/sudo.spec
+  telnet:
+    spec: platforms/el7/packages/telnet/telnet.spec
+  vim:
+    enabled: false   # Temporarily paused: excluded from scheduled, forced and retry builds.
+    spec: platforms/el7/packages/vim/vim.spec

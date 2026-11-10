@@ -8,7 +8,9 @@ case "$scenario" in fresh|upgrade|reinstall|uninstall|symlink-guard) ;; *) exit 
 source /etc/os-release
 [ "$ID:$VERSION_ID:$(dpkg --print-architecture)" = ubuntu:22.04:amd64 ] || exit 2
 SRC="${SRC_DIR:-/src}"
-dir="$SRC/dist/openssh/ubuntu2204"
+# 产物目录由 scripts/package.sh 注入（dist/<platform>/<package>）。
+: "${DIST_DIR:?DIST_DIR missing (invoke via scripts/package.sh)}"
+dir="$SRC/$DIST_DIR"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates python3 binutils sshpass systemd

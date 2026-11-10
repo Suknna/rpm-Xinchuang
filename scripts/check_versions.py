@@ -1,80 +1,60 @@
 #!/usr/bin/env python3
-"""Find newer upstream releases for enabled RPM components via Anitya."""
+"""Detect upstream updates per enabled (platform, package) target for the CI matrix.
+
+上游注册与目标组合唯一来自 scripts/project_config.py（platforms/<id>/platform.yaml
+与 packaging/upstreams.yaml），不再维护内置 PROJECTS 表。输出一个统一的矩阵
+（字段为 platform 而非旧的 el），OpenSSH 的全部平台与组件一起进入矩阵。
+"""
 
 import argparse
 import json
 import os
+import pathlib
 import re
 import urllib.parse
 import urllib.request
 
-# Pin project IDs: Anitya has unrelated projects named sudo and ntp.
-PROJECTS = {
-    "openssh": ("OpenSSH", 2565, r"\d+\.\d+p\d+", "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-{version}.tar.gz"),
-    "chrony": ("chrony", 8810, r"\d+(?:\.\d+)+", "https://chrony-project.org/releases/chrony-{version}.tar.gz"),
-    # Temporarily paused: exclude Vim from scheduled, forced and retry builds.
-    # "vim": ("vim", 5092, r"\d+(?:\.\d+)+", "https://github.com/vim/vim/archive/refs/tags/v{version}.tar.gz"),
-    "bash": ("bash", 166, r"\d+(?:\.\d+)+", "https://ftp.gnu.org/gnu/bash/bash-{version}.tar.gz"),
-    "sudo": ("sudo", 4906, r"\d+(?:\.\d+)+p\d+", "https://www.sudo.ws/dist/sudo-{version}.tar.gz"),
-    "ntp": ("ntp", 9025, r"\d+(?:\.\d+)+p\d+", "https://downloads.nwtime.org/ntp/ntp-{version}.tar.gz"),
-    "telnet": ("inetutils", 13805, r"\d+(?:\.\d+)+", "https://ftp.gnu.org/gnu/inetutils/inetutils-{version}.tar.gz"),
-}
+import project_config
+
 API = "https://release-monitoring.org/api/v2/projects/?name="
-PLATFORMS = ("el7", "el8", "centos7")
-SSH_PLATFORMS = ("centos7", "ubuntu2204")
 
 
-def platform_openssh(version, platform):
-    return {"package": "openssh", "el": platform, "version": version,
-            "url": PROJECTS["openssh"][3].format(version=version)}
+def load_state(path):
+    """version.json 只接受新格式；一次性迁移已随本仓库提交，无旧格式兼容层。"""
+    state = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    if not isinstance(state.get("platforms"), dict):
+        raise ValueError("unsupported version.json format: expected {'platforms': {...}}")
+    return state
 
 
-def centos_openssh(version):
-    return {"package": "openssh", "el": "centos7", "version": version,
-            "url": PROJECTS["openssh"][3].format(version=version)}
+def baseline(state, platform, package):
+    """Published-version baseline; an absent entry bootstraps the latest release."""
+    return state["platforms"].get(platform, {}).get(package)
 
 
-def latest(package, fetch=None):
+def latest(package, upstream, fetch=None):
     """Read stable releases for the exact upstream project, not a name collision."""
-    name, project_id, pattern, _ = PROJECTS[package]
-    url = API + urllib.parse.quote(name)
-    if fetch is None:
-        def fetch(url):
-            with urllib.request.urlopen(url, timeout=30) as response:
-                return json.load(response)
+    url = API + urllib.parse.quote(upstream["name"])
+
+    def default_fetch(requested):
+        with urllib.request.urlopen(requested, timeout=30) as response:
+            return json.load(response)
+
+    fetch = fetch or default_fetch
     projects = fetch(url)["items"]
-    project = next((item for item in projects if item["id"] == project_id), None)
+    project = next((item for item in projects if item["id"] == upstream["anitya_id"]), None)
     if project is None:
-        raise ValueError("Anitya project missing: %s (%s)" % (name, project_id))
+        raise ValueError("Anitya project missing: %s (%s)"
+                         % (upstream["name"], upstream["anitya_id"]))
     versions = project["stable_versions"]
-    if not versions or not re.fullmatch(pattern, versions[0]):
+    if not versions or not re.fullmatch(upstream["version_pattern"], versions[0]):
         raise ValueError("invalid stable version for %s: %r" % (package, versions[:1]))
     return versions
 
 
-def detect(state, get_versions=latest, force=False):
-    """Build only when upstream is ahead of a platform's published version."""
-    matrix = []
-    openssh = get_versions("openssh")
-    ssh_update = openssh[0] if is_newer(openssh, state["openssh"]) else ""
-    for platform in SSH_PLATFORMS:
-        if is_newer(openssh, state.get("openssh_" + platform)):
-            matrix.append(platform_openssh(openssh[0], platform))
-    for package, (_, _, _, template) in PROJECTS.items():
-        if package == "openssh":
-            continue
-        versions = get_versions(package)
-        version = versions[0]
-        for el in PLATFORMS:
-            if force or is_newer(versions, state[package].get(el)):
-                matrix.append({"package": package, "el": el, "version": version,
-                               "url": template.format(version=version)})
-    return ssh_update, matrix
-
-
 def is_newer(versions, current):
     # Anitya orders stable_versions newest-first. Unknown/absent baselines
-    # (e.g. an EL8 package never published here) bootstrap the latest release.
+    # bootstrap the latest release; equal or older baselines never rebuild.
     if current is None:
         return True
     def parts(version):
@@ -83,69 +63,126 @@ def is_newer(versions, current):
     return parts(versions[0]) > parts(current)
 
 
-def repair_pam_matrix(state, sudo_spec="spec/sudo/el8.spec"):
-    """Rebuild only the affected SSH and EL8 sudo packages, without Anitya."""
-    with open(sudo_spec, encoding="utf-8") as fh:
-        match = re.search(r"^Version:\s*(\S+)", fh.read(), re.MULTILINE)
-    if match is None or not re.fullmatch(PROJECTS["sudo"][2], match.group(1)):
-        raise ValueError("invalid sudo version in " + str(sudo_spec))
-    version = match.group(1)
-    return state["openssh"], [centos_openssh(state["openssh"]), {
-        "package": "sudo", "el": "el8", "version": version,
-        "url": PROJECTS["sudo"][3].format(version=version),
-    }]
+def matrix_row(target, version, upstream):
+    return {"platform": target["platform"], "package": target["package"],
+            "version": version, "url": upstream["source_url"].format(version=version)}
 
 
-def retry_component_matrix(selection):
-    """Retry exactly one pinned upstream component on all platforms."""
-    package, sep, version = selection.partition(":")
-    if not sep or package not in PROJECTS or package == "openssh":
-        raise ValueError("invalid retry component: " + selection)
-    pattern, template = PROJECTS[package][2:]
-    if not re.fullmatch(pattern, version):
-        raise ValueError("invalid retry version: " + selection)
-    return "", [{"package": package, "el": el, "version": version,
-                 "url": template.format(version=version)} for el in PLATFORMS]
+def matrix_rows(state, targets, upstreams, get_versions, force=False):
+    """One row per (platform, package) whose upstream is ahead of its baseline."""
+    rows = []
+    for target in sorted(targets, key=lambda item: (item["package"], item["platform"])):
+        package, platform = target["package"], target["platform"]
+        upstream = upstreams[package]
+        versions = get_versions(package)
+        # --force rebuilds the current upstream release of enabled components;
+        # OpenSSH follows real updates or an explicit --openssh-version pin.
+        if (force and package != "openssh") or is_newer(versions, baseline(state, platform, package)):
+            rows.append(matrix_row(target, versions[0], upstream))
+    return rows
 
 
-def main():
+def parse_selection(selection, targets):
+    """Parse 'pkg', 'pkg/platform', 'pkg@ver', 'pkg/platform@ver' (comma separated)."""
+    selected = []
+    for entry in selection.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, _, pinned = entry.partition("@")
+        parts = name.split("/")
+        if len(parts) > 2 or not parts[0]:
+            raise ValueError("invalid target selection: " + entry)
+        platform = parts[1] if len(parts) == 2 else None
+        matched = [target for target in targets
+                   if target["package"] == parts[0]
+                   and (platform is None or target["platform"] == platform)]
+        if not matched:
+            raise ValueError("unknown target: " + entry)
+        selected.extend({"platform": target["platform"], "package": target["package"],
+                         "pin": pinned or None} for target in matched)
+    return selected
+
+
+def selection_rows(state, selected, upstreams, get_versions):
+    """Manual selection; version precedence: @pin > published baseline > upstream latest."""
+    rows = {}
+    for item in selected:
+        upstream = upstreams[item["package"]]
+        version = (item["pin"] or baseline(state, item["platform"], item["package"])
+                   or get_versions(item["package"])[0])
+        rows[(item["platform"], item["package"])] = matrix_row(item, version, upstream)
+    # 与 matrix_rows 同序：先包名后平台，输出稳定可读。
+    return [rows[key] for key in sorted(rows, key=lambda item: (item[1], item[0]))]
+
+
+def apply_openssh_pin(rows, targets, upstreams, version):
+    """Replace detected OpenSSH rows with a pinned version on every OpenSSH target."""
+    if not re.fullmatch(upstreams["openssh"]["version_pattern"], version):
+        raise ValueError("invalid OpenSSH version: " + version)
+    pinned = [matrix_row(target, version, upstreams["openssh"])
+              for target in targets if target["package"] == "openssh"]
+    rows = [row for row in rows if row["package"] != "openssh"]
+    rows.extend(pinned)
+    return sorted(rows, key=lambda row: (row["package"], row["platform"]))
+
+
+def detect(state, targets, upstreams, get_versions, force=False, selection=None,
+           openssh_version=""):
+    if selection is not None:
+        rows = selection_rows(state, selection, upstreams, get_versions)
+    else:
+        rows = matrix_rows(state, targets, upstreams, get_versions, force=force)
+    if openssh_version:
+        rows = apply_openssh_pin(rows, targets, upstreams, openssh_version)
+    return rows
+
+
+def registries(config_root):
+    """Enabled upstreams and enabled (platform, package) targets from the config."""
+    config = project_config.load_config(config_root)
+    upstreams = {package: upstream for package, upstream in config["upstreams"].items()
+                 if upstream["enabled"]}
+    targets = list(project_config.iter_targets(config))
+    unregistered = sorted({target["package"] for target in targets} - set(upstreams))
+    if unregistered:
+        raise ValueError("targets without an enabled upstream: " + ", ".join(unregistered))
+    return targets, upstreams
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version-file", default="version.json")
+    parser.add_argument("--config-root", default=".")
     parser.add_argument("--output", default=os.environ.get("GITHUB_OUTPUT", ""))
-    parser.add_argument("--force", action="store_true", help="rebuild the current upstream release")
-    parser.add_argument("--repair-pam", action="store_true", help="rebuild SSH and EL8 sudo PAM repairs only")
-    parser.add_argument("--retry-component", help="retry one component at a pinned version (e.g. chrony:4.9)")
-    parser.add_argument("--sudo-spec", default="spec/sudo/el8.spec")
+    parser.add_argument("--force", action="store_true",
+                        help="rebuild the current upstream release of enabled components")
+    parser.add_argument("--targets",
+                        help="manual selection: pkg, pkg/platform, pkg@ver, pkg/platform@ver")
     parser.add_argument("--openssh-version", default=os.environ.get("FORCE_VERSION", ""),
-                        help="build a pinned OpenSSH version on all platforms")
-    args = parser.parse_args()
-    if sum((args.repair_pam, args.force, bool(args.retry_component))) > 1:
-        parser.error("--repair-pam, --force and --retry-component cannot be combined")
-    if args.openssh_version:
-        if args.repair_pam or args.retry_component:
-            parser.error("--openssh-version cannot be combined with --repair-pam or --retry-component")
-        if not re.fullmatch(PROJECTS["openssh"][2], args.openssh_version):
-            parser.error("invalid OpenSSH version: " + args.openssh_version)
-    with open(args.version_file, encoding="utf-8") as fh:
-        state = json.load(fh)
-    if args.retry_component:
-        ssh, matrix = retry_component_matrix(args.retry_component)
-    elif args.repair_pam:
-        ssh, matrix = repair_pam_matrix(state, args.sudo_spec)
-    else:
-        ssh, matrix = detect(state, force=args.force)
-    if args.openssh_version:
-        ssh = args.openssh_version
-        matrix = [row for row in matrix if row["package"] != "openssh"]
-        matrix.extend(platform_openssh(ssh, platform) for platform in SSH_PLATFORMS)
-    print("OpenSSH update:", ssh or "none")
-    print("Matrix updates:", ", ".join(p["package"] + "/" + p["el"] for p in matrix) or "none")
+                        help="build a pinned OpenSSH version on all OpenSSH platforms")
+    args = parser.parse_args(argv)
+    if args.targets and (args.force or args.openssh_version):
+        parser.error("--targets cannot be combined with --force or --openssh-version")
+    try:
+        targets, upstreams = registries(args.config_root)
+        state = load_state(args.version_file)
+
+        def get_versions(package):
+            return latest(package, upstreams[package])
+
+        selection = parse_selection(args.targets, targets) if args.targets else None
+        matrix = detect(state, targets, upstreams, get_versions, force=args.force,
+                        selection=selection, openssh_version=args.openssh_version)
+    except ValueError as exc:
+        parser.exit(2, "error: %s\n" % exc)
+    print("Matrix updates:",
+          ", ".join(row["package"] + "/" + row["platform"] for row in matrix) or "none")
     if args.output:
-        with open(args.output, "a", encoding="utf-8") as fh:
-            fh.write("new_version=" + ssh + "\n")
-            fh.write("matrix=" + json.dumps({"include": matrix}, separators=(",", ":")) + "\n")
-            fh.write("has_updates=" + str(bool(matrix)).lower() + "\n")
-    return ssh, matrix
+        with open(args.output, "a", encoding="utf-8") as output:
+            output.write("matrix=" + json.dumps({"include": matrix}, separators=(",", ":")) + "\n")
+            output.write("has_updates=" + str(bool(matrix)).lower() + "\n")
+    return matrix
 
 
 if __name__ == "__main__":

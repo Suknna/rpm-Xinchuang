@@ -1,0 +1,8 @@
+# Ubuntu 22.04 平台：DEB 打包，仅 openssh。
+# Docker Official Image ubuntu:22.04; callers explicitly select linux/amd64.
+image: docker.io/library/ubuntu@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+family: deb
+packages:
+  openssh:
+    spec: packaging/common/openssh/openssh.spec   # 版本宏（%global ver/rel）唯一来源
+    packaging: platforms/ubuntu2204/packages/openssh/debian

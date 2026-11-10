@@ -1,0 +1,28 @@
+# EL7 平台：官方 UBI7 镜像（digest 固定），RPM 打包。
+# CentOS 7 平台复用本目录的打包（见 platforms/centos7/platform.yaml）。
+# 路径一律相对仓库根；assets 缺省为 spec 同目录的 assets/。
+# pre_build 是宿主机构建前置钩子名（scripts 侧映射为具体脚本），缺省表示无。
+image: registry.access.redhat.com/ubi7/ubi@sha256:046e525722f14702c360dc6092324af7c21656e76b0c254b067871f1d4d3df68
+family: rpm
+el: el7
+packages:
+  openssh:
+    spec: packaging/common/openssh/openssh.spec
+    packaging: packaging/common/openssh
+    assets: packaging/common/openssh
+  bash:
+    spec: platforms/el7/packages/bash/bash.spec
+  chrony:
+    spec: platforms/el7/packages/chrony/chrony.spec
+    aux_source: 10
+  ntp:
+    spec: platforms/el7/packages/ntp/ntp.spec
+    aux_source: 5
+    pre_build: ntp-openssl
+  sudo:
+    spec: platforms/el7/packages/sudo/sudo.spec
+  telnet:
+    spec: platforms/el7/packages/telnet/telnet.spec
+  vim:
+    enabled: false   # Temporarily paused: excluded from scheduled, forced and retry builds.
+    spec: platforms/el7/packages/vim/vim.spec

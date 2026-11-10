@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # RPM 安装行为测试：在干净的官方 UBI / CentOS 容器内运行。
 #
-# 用法（宿主机，见 local-test.sh）：
-#   docker run --rm -v "$PWD":/src registry.access.redhat.com/ubi7/ubi:latest \
-#       bash /src/scripts/test-install.sh el7 fresh
+# 用法（经统一入口调度，见 scripts/package.sh）：
+#   scripts/package.sh test <platform> openssh [scenario...]
+# 容器内由 package.sh 注入 PACKAGING_EL（补充源/包管理分支）与
+# DIST_DIR（dist/<platform>/<package>）。
 #
 # 场景：
 #   fresh         全新安装：不生成 host key、不启动 sshd、服务注册且开机自启、
@@ -18,13 +19,14 @@
 # 任一断言失败都会使脚本以非零退出。
 set -uo pipefail
 
-PLATFORM="${1:?usage: test-install.sh <el7|el8|centos7> <scenario>}"
+PLATFORM="${1:?usage: test-install.sh <platform> <scenario>}"
 SCENARIO="${2:?missing scenario}"
 SRC="${SRC_DIR:-/src}"
-# shellcheck source=scripts/platforms.sh
-source "$SRC/scripts/platforms.sh"
-EL="$(platform_el "$PLATFORM")" || exit 2
-DIST="$SRC/dist/$PLATFORM"
+# 打包家族（el7|el8）与产物目录由 scripts/package.sh 注入；
+# 平台（含 centos7）只影响 RPM 后缀与产物路径。
+EL="${PACKAGING_EL:?PACKAGING_EL missing (invoke via scripts/package.sh)}"
+DIST="${DIST_DIR:+$SRC/$DIST_DIR}"
+[ -n "$DIST" ] || { echo "DIST_DIR missing (invoke via scripts/package.sh)" >&2; exit 2; }
 MARKER="# RPM-XINCHUANG-TEST-MARKER"
 
 FAILURES=0
@@ -121,6 +123,16 @@ ensure_test_deps() { # 测试工具链补齐（部分场景在 PM_INSTALL 之前
 	}
 }
 ensure_test_deps
+
+# 实际包身份与构建元数据一致（主包+子包 Name/Version/Release/Arch；共享 spec
+# 按 dist 展开宏），在任一场景安装前先校验。
+BUILD_SPEC="$DIST/build.spec"
+[ -f "$BUILD_SPEC" ] || { echo "missing build metadata: $DIST_DIR/build.spec (invoke via scripts/package.sh)" >&2; exit 2; }
+# shellcheck source=scripts/rpm-identity.sh
+source "$SRC/scripts/rpm-identity.sh"
+OPENSSH_VER="$(sed -n 's/^%global ver[[:space:]]\+//p' "$BUILD_SPEC" | head -1 | tr -d '[:space:]')"
+[ -n "$OPENSSH_VER" ] || { echo "cannot parse %global ver from $BUILD_SPEC" >&2; exit 2; }
+rpm_identity_verify "$DIST" "$BUILD_SPEC" "$PLATFORM" "$OPENSSH_VER" || exit 1
 
 case "$SCENARIO" in
 

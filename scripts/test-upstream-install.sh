@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Verify binary RPM installation and a real command in a fresh platform container.
+# 容器内执行；PACKAGING_EL/DIST_DIR 由 scripts/package.sh 注入。
 set -euo pipefail
-PKG="${1:?usage: test-upstream-install.sh <package> <el7|el8|centos7> <version>}"
+PKG="${1:?usage: test-upstream-install.sh <package> <platform> <version>}"
 PLATFORM="${2:?missing platform}"
 VER="${3:?missing version}"
 SRC="${SRC_DIR:-/src}"
-# shellcheck source=scripts/platforms.sh
-source "$SRC/scripts/platforms.sh"
-EL="$(platform_el "$PLATFORM")"
-DIST="$SRC/dist/$PKG/$PLATFORM"
+EL="${PACKAGING_EL:?PACKAGING_EL missing (invoke via scripts/package.sh)}"
+DIST="${DIST_DIR:+$SRC/$DIST_DIR}"
+[ -n "$DIST" ] || { echo "DIST_DIR missing (invoke via scripts/package.sh)" >&2; exit 2; }
 
 test_chrony_daemon() {
   # No external NTP traffic and no access to the system clock (-x, port 0).
@@ -40,6 +40,10 @@ CHRONY
 # shellcheck source=scripts/repos-common.sh
 source "$SRC/scripts/repos-common.sh"
 "configure_repos_$EL"
+# 实际包身份与构建元数据一致（Name/Version/Release/Arch；共享 spec 按 dist 展开宏）。
+# shellcheck source=scripts/rpm-identity.sh
+source "$SRC/scripts/rpm-identity.sh"
+rpm_identity_verify "$DIST" "$DIST/build.spec" "$PLATFORM" "$VER" || exit 1
 shopt -s nullglob
 rpms=("$DIST"/*.rpm)
 install=()
@@ -58,7 +62,17 @@ else
 fi
 query_pkg="$PKG"
 [ "$PKG" != vim ] || query_pkg=vim-enhanced
-rpm -q --qf '%{VERSION}\n' "$query_pkg" | grep -Fx "$VER"
+# 安装后身份核对：Version/Release 与 build.spec（含 dist 展开值）一致，Arch 合理。
+expected_release="$(rpm_identity_release "$DIST/build.spec" "$PLATFORM")"
+identity="$(rpm -q --qf '%{VERSION} %{RELEASE} %{ARCH}' "$query_pkg" 2>/dev/null)" || {
+  echo "package $query_pkg ($VER) not installed" >&2; exit 1;
+}
+read -r got_version got_release got_arch <<<"$identity"
+if [ "$got_version" != "$VER" ] || [ "$got_release" != "$expected_release" ] \
+    || { [ "$got_arch" != x86_64 ] && [ "$got_arch" != noarch ]; }; then
+  echo "installed identity mismatch: $query_pkg $got_version-$got_release.$got_arch, expected $VER-$expected_release.{x86_64|noarch}" >&2
+  exit 1
+fi
 case "$PKG" in
   bash) /bin/bash -c '[[ $(printf ok) == ok ]]' && /bin/bash --version | grep -F "$VER" ;;
   sudo) if [ "$EL" = el7 ]; then yum -y -q install cpio shadow-utils util-linux
@@ -97,6 +111,9 @@ case "$PKG" in
           test -f /usr/lib/systemd/system/telnet.socket
           if [ "$EL" = el7 ]; then python "$SRC/scripts/test-telnet-negotiation.py"
           else /usr/libexec/platform-python "$SRC/scripts/test-telnet-negotiation.py"; fi ;;
-  *) exit 2 ;;
+  *)
+    # 通用默认 smoke：只承诺安装后 EVR 一致（上方 rpm -q 已强校验）。
+    # 未注册专用验证的包不伪报组件特有检查；配置新增普通包无需改本脚本。
+    echo "$PKG $VER on $PLATFORM installed; no package-specific smoke test registered" ;;
 esac
 echo "$PKG $VER on $PLATFORM installed and ran successfully"
